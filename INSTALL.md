@@ -40,6 +40,22 @@ git pull
 bash ./scripts/bootstrap-local.sh
 ```
 
+## Publish releases
+
+This repo is set up for npm Trusted Publishing from GitHub Actions.
+
+1. Create the `codex-reasoning-router` package on npm if it does not exist yet.
+2. In npm package settings, add `francisronge/codex-reasoning-router` as a Trusted Publisher for GitHub Actions.
+3. Release by tagging a version:
+
+```bash
+npm version patch
+git push
+git push --tags
+```
+
+No long-lived `NPM_TOKEN` is required for the GitHub workflow.
+
 ## Remove
 
 ```bash

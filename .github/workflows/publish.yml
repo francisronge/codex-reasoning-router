@@ -19,11 +19,14 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22.14.0
           registry-url: "https://registry.npmjs.org"
 
+      - name: Setup npm
+        run: npm install -g npm@latest
+
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Run tests
         run: npm test
@@ -35,6 +38,4 @@ jobs:
           test "$PACKAGE_VERSION" = "$TAG_VERSION"
 
       - name: Publish to npm
-        run: npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public

@@ -112,13 +112,15 @@ Versioned release flow:
 2. Run `npm test`.
 3. Bump the version with `npm version patch|minor|major`.
 4. Push the commit and the generated `v*` tag.
-5. GitHub Actions publishes the package to npm.
+5. GitHub Actions publishes the package to npm with provenance.
 
 The publish workflow lives at `.github/workflows/publish.yml`.
 
-Required GitHub secret:
+Recommended npm setup:
 
-- `NPM_TOKEN`
+- Configure npm Trusted Publishing for `francisronge/codex-reasoning-router` on npm.
+- No long-lived `NPM_TOKEN` is required.
+- The workflow uses GitHub OIDC plus `npm publish --provenance --access public`.
 
 ## Install Guide
 
