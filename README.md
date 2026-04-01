@@ -122,7 +122,7 @@ Required GitHub secret:
 
 ## Install Guide
 
-The short install guide for other Codex users lives in [INSTALL.md](/Users/francisronge/Documents/Babel/codex-reasoning-router/INSTALL.md).
+The short install guide for other Codex users lives in [INSTALL.md](./INSTALL.md).
 
 ## Why not automate the desktop UI?
 
