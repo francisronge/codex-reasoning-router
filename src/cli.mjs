@@ -195,10 +195,19 @@ async function runMenubar(args) {
   const foreground = hasFlag(args, "--foreground");
   const paths = parseRepeatedFlags(args, "--path");
   const scriptPath = path.join(repoRoot, "scripts", "route-menubar.swift");
+  const watchedPaths = paths.length > 0
+    ? Array.from(new Set(paths.flatMap((watchedPath) => {
+      const resolved = path.resolve(watchedPath);
+      const livePath = resolved.endsWith("codex-reasoning-router-last-route.json")
+        ? resolved.replace(/codex-reasoning-router-last-route\.json$/, "codex-reasoning-router-live.json")
+        : null;
+      return livePath ? [livePath, resolved] : [resolved];
+    })))
+    : [];
   const spawnedArgs = [scriptPath];
 
-  for (const watchedPath of paths) {
-    spawnedArgs.push("--path", path.resolve(watchedPath));
+  for (const watchedPath of watchedPaths) {
+    spawnedArgs.push("--path", watchedPath);
   }
 
   if (foreground) {
@@ -231,7 +240,7 @@ async function runMenubar(args) {
     mode: "menubar",
     pid: child.pid,
     scriptPath,
-    paths: paths.map((value) => path.resolve(value))
+    paths: watchedPaths
   }, null, 2)}\n`);
 }
 

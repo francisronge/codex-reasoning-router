@@ -11,6 +11,11 @@ function defaultLogPath(cwd) {
   return path.join(baseDir, "codex-reasoning-router-last-route.json");
 }
 
+function liveStatePath(cwd) {
+  const baseDir = cwd ? path.join(cwd, ".codex", "state") : path.join(os.homedir(), ".codex", "state");
+  return path.join(baseDir, "codex-reasoning-router-live.json");
+}
+
 function resolveCodexHome() {
   return process.env.CODEX_HOME ? path.resolve(process.env.CODEX_HOME) : path.join(os.homedir(), ".codex");
 }
@@ -94,6 +99,11 @@ export async function writeGlobalReasoningConfig({ modelReasoningEffort, planMod
 async function appendTrace(logPath, payload) {
   await fs.mkdir(path.dirname(logPath), { recursive: true });
   await fs.writeFile(logPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+}
+
+async function writeLiveState(filePath, payload) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 }
 
 async function restoreStateConfig(state) {
@@ -181,7 +191,16 @@ export async function runUserPromptSubmitHook(stdinText, options = {}) {
   const prompt = String(payload.prompt || "");
   const config = await readGlobalReasoningConfig();
   const statePath = sessionStatePath(payload.cwd, payload.session_id);
+  const livePath = liveStatePath(payload.cwd);
   const existingState = await readJson(statePath, null);
+  await writeLiveState(livePath, {
+    timestamp: new Date().toISOString(),
+    cwd: payload.cwd || null,
+    sessionId: payload.session_id || null,
+    turnId: payload.turn_id || null,
+    prompt,
+    phase: "routing"
+  });
   if (existingState?.phase !== "replay_pending") {
     await maybeRestoreLingeringSessionState(payload.cwd, payload.session_id, "next-user-prompt");
   }
@@ -209,6 +228,15 @@ export async function runUserPromptSubmitHook(stdinText, options = {}) {
       currentEffort,
       currentPlanEffort,
       statePhase: replayState.phase
+    });
+    await writeLiveState(livePath, {
+      timestamp: new Date().toISOString(),
+      cwd: payload.cwd || null,
+      sessionId: payload.session_id || null,
+      turnId: payload.turn_id || null,
+      prompt,
+      phase: "selected",
+      decision: replayState.decision
     });
     return {
       hookSpecificOutput: {
@@ -254,6 +282,15 @@ export async function runUserPromptSubmitHook(stdinText, options = {}) {
     currentEffort,
     currentPlanEffort,
     statePhase: state?.phase || null
+  });
+  await writeLiveState(livePath, {
+    timestamp: new Date().toISOString(),
+    cwd: payload.cwd || null,
+    sessionId: payload.session_id || null,
+    turnId: payload.turn_id || null,
+    prompt,
+    phase: needsReplay ? "selected" : "direct",
+    decision
   });
 
   return {

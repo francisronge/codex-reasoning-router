@@ -11,8 +11,9 @@ struct RouteRecord: Decodable {
 
   let timestamp: String?
   let cwd: String?
+  let phase: String?
   let prompt: String?
-  let decision: Decision
+  let decision: Decision?
 }
 
 final class RouteMenubarController: NSObject, NSApplicationDelegate {
@@ -67,7 +68,7 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
     statusItem.menu = menu
 
     refreshNow()
-    timer = Timer.scheduledTimer(timeInterval: 0.7, target: self, selector: #selector(refreshNow), userInfo: nil, repeats: true)
+    timer = Timer.scheduledTimer(timeInterval: 0.15, target: self, selector: #selector(refreshNow), userInfo: nil, repeats: true)
   }
 
   @objc private func refreshNow() {
@@ -81,10 +82,13 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
       let record = try JSONDecoder().decode(RouteRecord.self, from: data)
       let signature = "\(best.path)|\(best.modified.timeIntervalSince1970)"
 
-      let effort = record.decision.effort.uppercased()
-      let source = record.decision.source ?? "unknown"
-      let prompt = record.decision.promptSnippet ?? record.prompt ?? "No prompt"
+      let prompt = record.decision?.promptSnippet ?? record.prompt ?? "No prompt"
       let cwd = record.cwd ?? URL(fileURLWithPath: best.path).deletingLastPathComponent().path
+      let phase = record.phase ?? "selected"
+      let effort = phase == "routing"
+        ? "..."
+        : (record.decision?.effort.uppercased() ?? "--")
+      let source = record.decision?.source ?? (phase == "routing" ? "routing" : "unknown")
 
       if let button = statusItem.button {
         button.title = "CRR \(effort)"
@@ -92,13 +96,15 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
       }
 
       promptTitleItem.title = truncate("Prompt: \(prompt)", max: 72)
-      effortItem.title = "Effort: \(record.decision.effort)"
+      effortItem.title = "Effort: \(phase == \"routing\" ? \"routing...\" : (record.decision?.effort ?? \"--\"))"
       sourceItem.title = "Source: \(source)"
       pathItem.title = truncate("State file: \(cwd)", max: 72)
 
       if signature != lastSignature {
         lastSignature = signature
-        showNotification(effort: record.decision.effort, prompt: prompt)
+        if phase != "routing", let finalEffort = record.decision?.effort {
+          showNotification(effort: finalEffort, prompt: prompt)
+        }
       }
     } catch {
       setFallbackTitle()
@@ -167,7 +173,9 @@ while index < arguments.count {
 if paths.isEmpty {
   let cwd = FileManager.default.currentDirectoryPath
   paths = [
+    "\(cwd)/.codex/state/codex-reasoning-router-live.json",
     "\(cwd)/.codex/state/codex-reasoning-router-last-route.json",
+    "\(NSHomeDirectory())/.codex/state/codex-reasoning-router-live.json",
     "\(NSHomeDirectory())/.codex/state/codex-reasoning-router-last-route.json"
   ]
 }
