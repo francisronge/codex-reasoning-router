@@ -15,10 +15,17 @@ bash ./scripts/bootstrap-local.sh
 1. Runs `npm link` so `codex-reasoning-router` is available from your shell.
 2. Installs the router hooks into `~/.codex/hooks.json`.
 3. Ensures Codex hook support is enabled in `~/.codex/config.toml`.
+4. Enables model-routed prompt classification with a visible route banner in Codex responses.
 
 ## Use it across projects
 
 Once installed globally, the router works in Babel and any other repo you open with Codex on this machine.
+
+Default behavior:
+
+- Codex classifies the prompt before substantive work starts.
+- The router picks `minimal`, `low`, `medium`, `high`, or `xhigh`.
+- The first real response shows the chosen effort as `[auto-route: ...]`.
 
 Optional shell alias:
 

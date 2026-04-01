@@ -2,15 +2,22 @@
 
 `codex-reasoning-router` is a standalone helper for Codex that classifies task shape and routes reasoning effort before work starts.
 
-It is built around two realities:
+It is built around three realities:
 
 1. The OpenAI prompt guidance recommends choosing reasoning effort based on task shape, not just always using the highest setting.
 2. Current Codex hooks can add context on `UserPromptSubmit`, and `Stop` can automatically create a continuation turn.
+3. Codex itself can classify prompts with a strict JSON schema, so the routing decision can be model-based instead of pure regex.
 
 Because of that, the tool ships two complementary paths:
 
 - `launch`: the real pre-run router. It chooses an effort level, then starts Codex with `-c model_reasoning_effort=...`.
 - `hook`: the always-on in-Codex router. It uses a light preflight turn plus a `Stop` replay turn to retarget reasoning before substantive work starts.
+
+By default, routing is model-based:
+
+- the router asks Codex itself to classify the prompt with a schema-constrained output
+- the local heuristic path only runs as a fallback if the model classifier is unavailable
+- the first substantive response includes a visible route banner such as `[auto-route: low]`
 
 ## Install
 
@@ -58,6 +65,12 @@ Classify a prompt:
 node ./bin/codex-reasoning-router.mjs classify --prompt "fix the flaky CI regression and verify the root cause"
 ```
 
+Force local heuristic classification for debugging:
+
+```bash
+node ./bin/codex-reasoning-router.mjs classify --heuristic --prompt "did you update the readme"
+```
+
 Launch Codex with an auto-routed effort:
 
 ```bash
@@ -72,15 +85,15 @@ node ./bin/codex-reasoning-router.mjs launch --dry-run --full-auto -- "rename th
 
 ## Routing policy
 
-The router is intentionally deterministic and cheap:
+The model classifier chooses the smallest sufficient effort:
 
 - `minimal`: direct command-style lookups or tiny mechanical actions.
-- `low`: simple bounded edits, rewrites, or questions.
+- `low`: short bounded edits, status checks, rewrites, or straightforward questions.
 - `medium`: the default for ordinary coding tasks.
 - `high`: multi-step, dependency-aware, verification-heavy work.
 - `xhigh`: architecture, migration, security, or other high-impact tasks.
 
-The classifier uses weighted signals like:
+The fallback heuristic looks at signals like:
 
 - high impact or irreversible changes
 - research / verification requirements
@@ -97,7 +110,8 @@ The hooks use a small state machine:
 3. `PreToolUse` denies Bash commands during that precheck turn.
 4. `Stop` rewrites Codex config to the routed effort and automatically replays the original prompt as a new continuation turn.
 5. The replay turn runs after the routed config change.
-6. `SessionStart` and the next `UserPromptSubmit` restore any lingering routed config back to the previous baseline if a replay left state behind.
+6. The substantive response starts with a visible route banner such as `[auto-route: high]`.
+7. `SessionStart` and the next `UserPromptSubmit` restore any lingering routed config back to the previous baseline if a replay left state behind.
 
 The router also writes a trace file to:
 

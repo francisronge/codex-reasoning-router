@@ -41,6 +41,12 @@ function parseEffortValue(configText, key, fallback) {
   return KNOWN_EFFORTS.has(value) ? value : fallback;
 }
 
+function parseStringValue(configText, key, fallback = null) {
+  const match = configText.match(new RegExp(`^\\s*${key}\\s*=\\s*"([^"]+)"\\s*$`, "m"));
+  const value = String(match?.[1] || "").trim();
+  return value || fallback;
+}
+
 export async function readGlobalReasoningConfig() {
   const configPath = path.join(resolveCodexHome(), "config.toml");
   let configText = "";
@@ -50,6 +56,7 @@ export async function readGlobalReasoningConfig() {
     return {
       configPath,
       configText: "",
+      model: null,
       modelReasoningEffort: "medium",
       planModeReasoningEffort: "high"
     };
@@ -58,6 +65,7 @@ export async function readGlobalReasoningConfig() {
   return {
     configPath,
     configText,
+    model: parseStringValue(configText, "model", null),
     modelReasoningEffort: parseEffortValue(configText, "model_reasoning_effort", "medium"),
     planModeReasoningEffort: parseEffortValue(configText, "plan_mode_reasoning_effort", "high")
   };
@@ -149,19 +157,23 @@ function buildReplayContext(decision) {
   return (
     `Auto reasoning router replay. Reasoning has been retargeted to ${decision.effort} ` +
     `with planning at ${decision.planEffort}. Perform the user's request normally now. ` +
-    `${decision.guidance}`
+    `${decision.guidance} ` +
+    `Before anything else, print exactly "${decision.routeBanner}" on its own line, then continue normally.`
   );
 }
 
 export async function runUserPromptSubmitHook(stdinText, options = {}) {
   const payload = JSON.parse(stdinText || "{}");
   const prompt = String(payload.prompt || "");
-  const decision = routePrompt(prompt);
+  const config = await readGlobalReasoningConfig();
+  const decision = await routePrompt(prompt, {
+    cwd: payload.cwd || process.cwd(),
+    classifierModel: config.model || undefined
+  });
   const logPath = options.logPath || defaultLogPath(payload.cwd);
   const statePath = sessionStatePath(payload.cwd, payload.session_id);
   await maybeRestoreLingeringSessionState(payload.cwd, payload.session_id, "next-user-prompt");
   const existingState = await readJson(statePath, null);
-  const config = await readGlobalReasoningConfig();
   const currentEffort = config.modelReasoningEffort;
   const currentPlanEffort = config.planModeReasoningEffort;
 

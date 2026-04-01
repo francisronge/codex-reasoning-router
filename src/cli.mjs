@@ -4,7 +4,13 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-import { runPreToolUseHook, runSessionStartHook, runStopHook, runUserPromptSubmitHook } from "./hook.mjs";
+import {
+  readGlobalReasoningConfig,
+  runPreToolUseHook,
+  runSessionStartHook,
+  runStopHook,
+  runUserPromptSubmitHook
+} from "./hook.mjs";
 import { installIntoCodexDir } from "./install.mjs";
 import { formatDecision, routePrompt } from "./router.mjs";
 
@@ -18,9 +24,9 @@ function usage() {
     "codex-reasoning-router",
     "",
     "Commands:",
-    "  classify --prompt \"...\" [--json]",
+    "  classify [--heuristic] --prompt \"...\" [--json]",
     "  hook user-prompt-submit",
-    "  launch [codex args...] -- \"prompt text\"",
+    "  launch [--heuristic-router] [codex args...] -- \"prompt text\"",
     "  install [--scope global|project] [--root DIR]",
     ""
   ].join("\n");
@@ -71,7 +77,13 @@ function hasReasoningOverride(args) {
 async function runClassify(args) {
   const prompt = parseFlag(args, "--prompt") || args.join(" ");
   const format = hasFlag(args, "--json") ? "json" : "text";
-  const decision = routePrompt(prompt);
+  const mode = hasFlag(args, "--heuristic") ? "heuristic" : undefined;
+  const config = await readGlobalReasoningConfig();
+  const decision = await routePrompt(prompt, {
+    cwd: process.cwd(),
+    mode,
+    classifierModel: config.model || undefined
+  });
   process.stdout.write(`${formatDecision(decision, format)}\n`);
 }
 
@@ -98,7 +110,13 @@ async function runHook(args) {
 async function runLaunch(args) {
   const dryRun = hasFlag(args, "--dry-run");
   const { codexArgs, prompt } = resolvePromptFromLaunchArgs(args);
-  const decision = routePrompt(prompt);
+  const mode = hasFlag(codexArgs, "--heuristic-router") ? "heuristic" : undefined;
+  const config = await readGlobalReasoningConfig();
+  const decision = await routePrompt(prompt, {
+    cwd: process.cwd(),
+    mode,
+    classifierModel: config.model || undefined
+  });
   const spawnedArgs = [...codexArgs];
 
   if (!hasReasoningOverride(spawnedArgs)) {
