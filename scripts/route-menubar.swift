@@ -96,7 +96,8 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
       }
 
       promptTitleItem.title = truncate("Prompt: \(prompt)", max: 72)
-      effortItem.title = "Effort: \(phase == \"routing\" ? \"routing...\" : (record.decision?.effort ?? \"--\"))"
+      let effortDetail = phase == "routing" ? "routing..." : (record.decision?.effort ?? "--")
+      effortItem.title = "Effort: \(effortDetail)"
       sourceItem.title = "Source: \(source)"
       pathItem.title = truncate("State file: \(cwd)", max: 72)
 
