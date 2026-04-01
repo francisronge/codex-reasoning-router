@@ -164,6 +164,18 @@ function buildReplayContext(decision) {
   );
 }
 
+function buildReplayPrompt(state) {
+  return [
+    `Auto reasoning router replay.`,
+    `The routed effort for this task is ${state.decision.effort}.`,
+    `Your first line must be exactly "${state.decision.routeBanner}".`,
+    `After that, answer the user's original request normally.`,
+    "",
+    `Original prompt:`,
+    state.originalPrompt
+  ].join("\n");
+}
+
 export async function runUserPromptSubmitHook(stdinText, options = {}) {
   const payload = JSON.parse(stdinText || "{}");
   const prompt = String(payload.prompt || "");
@@ -295,7 +307,7 @@ export async function runStopHook(stdinText) {
     });
     return {
       decision: "block",
-      reason: state.originalPrompt
+      reason: buildReplayPrompt(state)
     };
   }
 

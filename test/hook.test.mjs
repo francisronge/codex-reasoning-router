@@ -41,6 +41,8 @@ test("replay flow injects a visible route banner into Codex", async () => {
     }));
 
     assert.equal(stopResult.decision, "block");
+    assert.match(stopResult.reason, /\[auto-route: low\]/);
+    assert.match(stopResult.reason, /Your first line must be exactly/);
 
     const replayTurn = await runUserPromptSubmitHook(JSON.stringify({
       prompt: "rename this variable",
@@ -97,6 +99,7 @@ test("forces replay even when the routed effort matches the current baseline", a
     }));
 
     assert.equal(stopResult.decision, "block");
+    assert.match(stopResult.reason, /\[auto-route: low\]/);
   } finally {
     if (previousHome === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = previousHome;
