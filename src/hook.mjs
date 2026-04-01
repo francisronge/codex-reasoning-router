@@ -166,19 +166,51 @@ export async function runUserPromptSubmitHook(stdinText, options = {}) {
   const payload = JSON.parse(stdinText || "{}");
   const prompt = String(payload.prompt || "");
   const config = await readGlobalReasoningConfig();
+  const statePath = sessionStatePath(payload.cwd, payload.session_id);
+  const existingState = await readJson(statePath, null);
+  if (existingState?.phase !== "replay_pending") {
+    await maybeRestoreLingeringSessionState(payload.cwd, payload.session_id, "next-user-prompt");
+  }
+  const currentState = existingState?.phase === "replay_pending"
+    ? existingState
+    : await readJson(statePath, null);
+  const logPath = options.logPath || defaultLogPath(payload.cwd);
+  const currentEffort = config.modelReasoningEffort;
+  const currentPlanEffort = config.planModeReasoningEffort;
+
+  if (currentState?.phase === "replay_pending") {
+    const replayState = {
+      ...currentState,
+      turnId: payload.turn_id || currentState.turnId || null,
+      phase: "replay_active"
+    };
+    await writeJson(statePath, replayState);
+    await appendTrace(logPath, {
+      timestamp: new Date().toISOString(),
+      cwd: payload.cwd || null,
+      sessionId: payload.session_id || null,
+      transcriptPath: payload.transcript_path || null,
+      prompt,
+      decision: replayState.decision,
+      currentEffort,
+      currentPlanEffort,
+      statePhase: replayState.phase
+    });
+    return {
+      hookSpecificOutput: {
+        hookEventName: "UserPromptSubmit",
+        additionalContext: buildReplayContext(replayState.decision)
+      }
+    };
+  }
+
   const decision = await routePrompt(prompt, {
     cwd: payload.cwd || process.cwd(),
     classifierModel: config.model || undefined
   });
-  const logPath = options.logPath || defaultLogPath(payload.cwd);
-  const statePath = sessionStatePath(payload.cwd, payload.session_id);
-  await maybeRestoreLingeringSessionState(payload.cwd, payload.session_id, "next-user-prompt");
-  const existingState = await readJson(statePath, null);
-  const currentEffort = config.modelReasoningEffort;
-  const currentPlanEffort = config.planModeReasoningEffort;
 
   let additionalContext = decision.additionalContext;
-  let state = existingState;
+  let state = currentState;
   const needsReplay =
     decision.effort !== currentEffort || decision.planEffort !== currentPlanEffort;
 
