@@ -4,6 +4,8 @@ import path from "node:path";
 
 import { KNOWN_EFFORTS, routePrompt } from "./router.mjs";
 
+const FORCE_VISIBLE_REPLAY = process.env.CODEX_REASONING_ROUTER_FORCE_REPLAY !== "0";
+
 function defaultLogPath(cwd) {
   const baseDir = cwd ? path.join(cwd, ".codex", "state") : path.join(os.homedir(), ".codex", "state");
   return path.join(baseDir, "codex-reasoning-router-last-route.json");
@@ -212,7 +214,9 @@ export async function runUserPromptSubmitHook(stdinText, options = {}) {
   let additionalContext = decision.additionalContext;
   let state = currentState;
   const needsReplay =
-    decision.effort !== currentEffort || decision.planEffort !== currentPlanEffort;
+    FORCE_VISIBLE_REPLAY ||
+    decision.effort !== currentEffort ||
+    decision.planEffort !== currentPlanEffort;
 
   state = {
     sessionId: payload.session_id || null,
