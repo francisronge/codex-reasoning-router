@@ -26,6 +26,13 @@ Default behavior:
 - Codex classifies the prompt before substantive work starts.
 - The router picks `minimal`, `low`, `medium`, `high`, or `xhigh`.
 - The first real response shows the chosen effort as `[auto-route: ...]`.
+- On macOS, you can launch a menubar watcher that shows the latest route persistently.
+
+Launch the watcher:
+
+```bash
+codex-reasoning-router menubar --path ./.codex/state/codex-reasoning-router-last-route.json
+```
 
 Optional shell alias:
 

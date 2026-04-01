@@ -28,6 +28,7 @@ function usage() {
     "  hook user-prompt-submit",
     "  launch [--heuristic-router] [codex args...] -- \"prompt text\"",
     "  install [--scope global|project] [--root DIR]",
+    "  menubar [--foreground] [--path FILE]...",
     ""
   ].join("\n");
 }
@@ -48,6 +49,21 @@ function hasFlag(args, flagName) {
   if (index === -1) return false;
   args.splice(index, 1);
   return true;
+}
+
+function parseRepeatedFlags(args, flagName) {
+  const values = [];
+  while (true) {
+    const index = args.indexOf(flagName);
+    if (index === -1) break;
+    const value = args[index + 1];
+    if (!value || value.startsWith("--")) {
+      throw new Error(`Missing value for ${flagName}`);
+    }
+    values.push(value);
+    args.splice(index, 2);
+  }
+  return values;
 }
 
 function resolvePromptFromLaunchArgs(args) {
@@ -175,6 +191,50 @@ async function runInstall(args) {
   );
 }
 
+async function runMenubar(args) {
+  const foreground = hasFlag(args, "--foreground");
+  const paths = parseRepeatedFlags(args, "--path");
+  const scriptPath = path.join(repoRoot, "scripts", "route-menubar.swift");
+  const spawnedArgs = [scriptPath];
+
+  for (const watchedPath of paths) {
+    spawnedArgs.push("--path", path.resolve(watchedPath));
+  }
+
+  if (foreground) {
+    await new Promise((resolve, reject) => {
+      const child = spawn("swift", spawnedArgs, {
+        stdio: "inherit",
+        env: process.env
+      });
+      child.on("error", reject);
+      child.on("exit", (code, signal) => {
+        if (signal) {
+          process.kill(process.pid, signal);
+          return;
+        }
+        process.exitCode = code ?? 0;
+        resolve();
+      });
+    });
+    return;
+  }
+
+  const child = spawn("swift", spawnedArgs, {
+    detached: true,
+    stdio: "ignore",
+    env: process.env
+  });
+  child.unref();
+  process.stdout.write(`${JSON.stringify({
+    launched: true,
+    mode: "menubar",
+    pid: child.pid,
+    scriptPath,
+    paths: paths.map((value) => path.resolve(value))
+  }, null, 2)}\n`);
+}
+
 function readStdin() {
   return new Promise((resolve, reject) => {
     let data = "";
@@ -203,6 +263,9 @@ export async function main(argv) {
       return;
     case "install":
       await runInstall(args);
+      return;
+    case "menubar":
+      await runMenubar(args);
       return;
     case "--help":
     case "-h":

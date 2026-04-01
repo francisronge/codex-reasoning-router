@@ -18,6 +18,7 @@ By default, routing is model-based:
 - the router asks Codex itself to classify the prompt with a schema-constrained output
 - the local heuristic path only runs as a fallback if the model classifier is unavailable
 - the first substantive response includes a visible route banner such as `[auto-route: low]`
+- on macOS, the optional menubar watcher can show the latest route as `CRR LOW`, `CRR HIGH`, or `CRR XHIGH`
 
 ## Install
 
@@ -81,6 +82,12 @@ Dry-run the routed launch:
 
 ```bash
 node ./bin/codex-reasoning-router.mjs launch --dry-run --full-auto -- "rename this variable"
+```
+
+Launch the macOS menubar watcher for the current workspace:
+
+```bash
+node ./bin/codex-reasoning-router.mjs menubar --path ./.codex/state/codex-reasoning-router-last-route.json
 ```
 
 ## Routing policy
