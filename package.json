@@ -1,0 +1,45 @@
+{
+  "name": "codex-reasoning-router",
+  "version": "0.1.0",
+  "description": "Automatic task-shape routing for Codex reasoning effort.",
+  "type": "module",
+  "homepage": "https://github.com/francisronge/codex-reasoning-router#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/francisronge/codex-reasoning-router.git"
+  },
+  "bugs": {
+    "url": "https://github.com/francisronge/codex-reasoning-router/issues"
+  },
+  "bin": {
+    "codex-reasoning-router": "./bin/codex-reasoning-router.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "scripts",
+    "README.md",
+    "INSTALL.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "release:check": "npm test",
+    "release:tag": "node ./scripts/print-next-steps.mjs"
+  },
+  "keywords": [
+    "codex",
+    "openai",
+    "reasoning",
+    "router",
+    "hooks",
+    "cli"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18.18"
+  }
+}
