@@ -248,7 +248,9 @@ export async function runUserPromptSubmitHook(stdinText, options = {}) {
 
   const decision = await routePrompt(prompt, {
     cwd: payload.cwd || process.cwd(),
-    classifierModel: config.model || undefined
+    classifierModel: config.model || undefined,
+    transcriptPath: payload.transcript_path || null,
+    previousDecision: currentState?.decision || null
   });
 
   let additionalContext = decision.additionalContext;

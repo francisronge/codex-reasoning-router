@@ -7,6 +7,7 @@ It is built around three realities:
 1. The OpenAI prompt guidance recommends choosing reasoning effort based on task shape, not just always using the highest setting.
 2. Current Codex hooks can add context on `UserPromptSubmit`, and `Stop` can automatically create a continuation turn.
 3. Codex itself can classify prompts with a strict JSON schema, so the routing decision can be model-based instead of pure regex.
+4. A short follow-up inside an active refactor or debugging thread should inherit that thread’s complexity instead of being classified in isolation.
 
 Because of that, the tool ships two complementary paths:
 
@@ -17,6 +18,7 @@ By default, routing is model-based:
 
 - the router asks Codex itself to classify the prompt with a schema-constrained output
 - the local heuristic path only runs as a fallback if the model classifier is unavailable
+- the router can include recent Codex thread context, prior routed effort, and current workspace state when choosing effort
 - the first substantive response includes a visible route banner such as `[auto-route: low]`
 - on macOS, the optional menubar watcher can show the latest route as `CRR LOW`, `CRR HIGH`, or `CRR XHIGH`
 - when hook files are stale in the desktop app, the menubar watcher can also listen for Return in Codex, OCR the visible composer, and classify the prompt at send-time
@@ -105,6 +107,13 @@ The model classifier chooses the smallest sufficient effort:
 - `medium`: the default for ordinary coding tasks.
 - `high`: multi-step, dependency-aware, verification-heavy work.
 - `xhigh`: architecture, migration, security, or other high-impact tasks.
+
+Routing is context-aware, not prompt-only:
+
+- a short follow-up can stay `high` or `xhigh` if the current Codex thread is still in the middle of a refactor, investigation, migration, or other complex work
+- the hook path can read recent Codex transcript context from `transcript_path`
+- the router also inspects current workspace state such as a dirty git worktree
+- the session carryover path can preserve a previous `high` or `xhigh` decision for terse follow-ups until the active thread settles
 
 The fallback heuristic looks at signals like:
 

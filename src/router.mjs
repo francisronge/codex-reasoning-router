@@ -195,10 +195,386 @@ const ROUTER_SCHEMA = {
 const DEFAULT_ROUTING_MODE = "model";
 const DEFAULT_CLASSIFIER_TIMEOUT_MS = 45000;
 const VISIBLE_ROUTE_PREFIX = "[auto-route:";
+const DEFAULT_TRANSCRIPT_TAIL_BYTES = 350_000;
+const MAX_RECENT_MESSAGES = 6;
+const MAX_SESSION_CANDIDATES = 12;
+const EFFORT_RANK = {
+  minimal: 0,
+  low: 1,
+  medium: 2,
+  high: 3,
+  xhigh: 4
+};
 
 const textIncludesAny = (text, patterns) => patterns.some((pattern) => pattern.test(text));
 
 const compactSnippet = (text) => text.replace(/\s+/g, " ").trim().slice(0, 180);
+
+function joinNonEmpty(parts, separator = "\n") {
+  return parts.map((value) => String(value || "").trim()).filter(Boolean).join(separator);
+}
+
+function safeJsonParse(value) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+async function readFileTail(filePath, maxBytes = DEFAULT_TRANSCRIPT_TAIL_BYTES) {
+  const handle = await fs.open(filePath, "r");
+  try {
+    const stats = await handle.stat();
+    const size = Number(stats.size || 0);
+    const start = Math.max(0, size - maxBytes);
+    const length = size - start;
+    const buffer = Buffer.alloc(length);
+    await handle.read(buffer, 0, length, start);
+    return buffer.toString("utf8");
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readFileHead(filePath, maxBytes = 4096) {
+  const handle = await fs.open(filePath, "r");
+  try {
+    const buffer = Buffer.alloc(maxBytes);
+    const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0);
+    return buffer.subarray(0, bytesRead).toString("utf8");
+  } finally {
+    await handle.close();
+  }
+}
+
+function extractMessageTextFromContent(content) {
+  if (!Array.isArray(content)) return "";
+  const parts = [];
+  for (const item of content) {
+    if (typeof item === "string") {
+      parts.push(item);
+      continue;
+    }
+    if (item?.type === "input_text" || item?.type === "output_text" || item?.type === "text") {
+      parts.push(item.text || item.content || "");
+      continue;
+    }
+    if (typeof item?.text === "string") {
+      parts.push(item.text);
+    }
+  }
+  return joinNonEmpty(parts, "\n");
+}
+
+function extractTranscriptMessage(record) {
+  const payload = record?.payload || {};
+
+  if (record?.type === "event_msg" && payload.type === "user_message" && payload.message) {
+    return { role: "user", text: String(payload.message) };
+  }
+
+  if (record?.type === "event_msg" && payload.type === "task_complete" && payload.last_agent_message) {
+    return { role: "assistant", text: String(payload.last_agent_message) };
+  }
+
+  if (record?.type === "response_item" && payload.type === "message" && payload.role) {
+    const text = extractMessageTextFromContent(payload.content);
+    if (text) {
+      return { role: payload.role, text };
+    }
+  }
+
+  return null;
+}
+
+function summarizeRecentMessages(messages) {
+  return messages.map((message, index) =>
+    `${index + 1}. ${message.role}: ${compactSnippet(message.text)}`
+  ).join("\n");
+}
+
+function transcriptPathCandidatesRoot() {
+  return path.join(os.homedir(), ".codex", "sessions");
+}
+
+async function listRecentSessionFiles(rootDir) {
+  const results = [];
+  let years = [];
+  try {
+    years = (await fs.readdir(rootDir, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort()
+      .reverse()
+      .slice(0, 2);
+  } catch {
+    return results;
+  }
+
+  for (const year of years) {
+    const yearDir = path.join(rootDir, year);
+    let months = [];
+    try {
+      months = (await fs.readdir(yearDir, { withFileTypes: true }))
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name)
+        .sort()
+        .reverse()
+        .slice(0, 2);
+    } catch {
+      continue;
+    }
+
+    for (const month of months) {
+      const monthDir = path.join(yearDir, month);
+      let days = [];
+      try {
+        days = (await fs.readdir(monthDir, { withFileTypes: true }))
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => entry.name)
+          .sort()
+          .reverse()
+          .slice(0, 4);
+      } catch {
+        continue;
+      }
+
+      for (const day of days) {
+        const dayDir = path.join(monthDir, day);
+        let files = [];
+        try {
+          files = (await fs.readdir(dayDir, { withFileTypes: true }))
+            .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
+            .map((entry) => path.join(dayDir, entry.name))
+            .sort()
+            .reverse();
+        } catch {
+          continue;
+        }
+        results.push(...files);
+        if (results.length >= MAX_SESSION_CANDIDATES) {
+          return results.slice(0, MAX_SESSION_CANDIDATES);
+        }
+      }
+    }
+  }
+
+  return results.slice(0, MAX_SESSION_CANDIDATES);
+}
+
+async function findLatestTranscriptForCwd(cwd) {
+  if (!cwd) return null;
+  const candidates = await listRecentSessionFiles(transcriptPathCandidatesRoot());
+  const cwdToken = JSON.stringify(String(cwd));
+
+  for (const candidate of candidates) {
+    try {
+      const head = await readFileHead(candidate);
+      if (head.includes(cwdToken)) {
+        return candidate;
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+}
+
+async function loadTranscriptContext(transcriptPath) {
+  if (!transcriptPath) return null;
+
+  let tail;
+  try {
+    tail = await readFileTail(transcriptPath);
+  } catch {
+    return null;
+  }
+
+  const records = tail
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map(safeJsonParse)
+    .filter(Boolean);
+
+  const recentMessages = [];
+  let modelContextWindow = null;
+  let transcriptEffort = null;
+  let transcriptModel = null;
+  let transcriptCwd = null;
+
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index];
+    const payload = record?.payload || {};
+
+    if (!modelContextWindow && record?.type === "event_msg" && payload.type === "task_started") {
+      modelContextWindow = payload.model_context_window ?? null;
+    }
+
+    if (record?.type === "turn_context") {
+      transcriptEffort ||= payload.effort ?? null;
+      transcriptModel ||= payload.model ?? null;
+      transcriptCwd ||= payload.cwd ?? null;
+    }
+
+    const message = extractTranscriptMessage(record);
+    if (message && message.text) {
+      recentMessages.unshift({
+        role: message.role,
+        text: compactSnippet(message.text)
+      });
+      if (recentMessages.length >= MAX_RECENT_MESSAGES) {
+        break;
+      }
+    }
+  }
+
+  if (recentMessages.length === 0 && !modelContextWindow && !transcriptEffort) {
+    return null;
+  }
+
+  return {
+    transcriptPath,
+    modelContextWindow,
+    transcriptEffort,
+    transcriptModel,
+    transcriptCwd,
+    recentMessages,
+    recentMessagesSummary: summarizeRecentMessages(recentMessages),
+    carryoverText: joinNonEmpty(recentMessages.map((message) => message.text), "\n")
+  };
+}
+
+function parseGitStatus(statusText) {
+  const lines = String(statusText || "").split("\n").filter(Boolean);
+  if (lines.length === 0) {
+    return null;
+  }
+
+  let branch = null;
+  let changedLines = lines;
+  if (lines[0].startsWith("## ")) {
+    branch = lines[0].slice(3).trim();
+    changedLines = lines.slice(1);
+  }
+
+  const changedPaths = changedLines
+    .map((line) => line.slice(3).trim())
+    .filter(Boolean)
+    .slice(0, 8);
+
+  return {
+    branch,
+    changedFileCount: changedLines.length,
+    changedPaths,
+    isDirty: changedLines.length > 0,
+    summary: changedLines.length > 0
+      ? `${changedLines.length} changed file(s)${changedPaths.length ? `: ${changedPaths.join(", ")}` : ""}`
+      : "clean worktree"
+  };
+}
+
+function runCommand(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let finished = false;
+    const timeoutMs = options.timeoutMs ?? DEFAULT_CLASSIFIER_TIMEOUT_MS;
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+    }, timeoutMs);
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      if (finished) return;
+      finished = true;
+      reject(error);
+    });
+    child.on("exit", (code, signal) => {
+      clearTimeout(timer);
+      if (finished) return;
+      finished = true;
+      if (signal) {
+        reject(new Error(`${command} terminated with signal ${signal}`));
+        return;
+      }
+      if (code !== 0) {
+        reject(new Error(stderr.trim() || stdout.trim() || `${command} failed with exit code ${code}`));
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
+async function loadWorkspaceContext(cwd) {
+  if (!cwd) return null;
+
+  try {
+    const { stdout } = await runCommand(
+      "git",
+      ["-C", path.resolve(cwd), "status", "--short", "--branch", "--untracked-files=normal"],
+      { cwd, timeoutMs: 2500 }
+    );
+    return parseGitStatus(stdout);
+  } catch {
+    return null;
+  }
+}
+
+export async function collectRoutingContext(options = {}) {
+  const transcriptPath = options.transcriptPath || await findLatestTranscriptForCwd(options.cwd || process.cwd());
+  const transcript = await loadTranscriptContext(transcriptPath);
+  const workspace = await loadWorkspaceContext(options.cwd || process.cwd());
+  const previousDecision = options.previousDecision || null;
+
+  const summaryLines = [];
+  if (previousDecision?.effort) {
+    summaryLines.push(`previous routed effort in this session: ${previousDecision.effort}`);
+  }
+  if (transcript?.modelContextWindow) {
+    summaryLines.push(`model context window: ${transcript.modelContextWindow}`);
+  }
+  if (transcript?.transcriptEffort) {
+    summaryLines.push(`latest transcript effort: ${transcript.transcriptEffort}`);
+  }
+  if (transcript?.recentMessagesSummary) {
+    summaryLines.push(`recent thread context:\n${transcript.recentMessagesSummary}`);
+  }
+  if (workspace?.branch) {
+    summaryLines.push(`workspace branch: ${workspace.branch}`);
+  }
+  if (workspace?.summary) {
+    summaryLines.push(`workspace state: ${workspace.summary}`);
+  }
+
+  return {
+    transcriptPath: transcript?.transcriptPath || null,
+    transcript,
+    workspace,
+    previousDecision,
+    summary: joinNonEmpty(summaryLines, "\n"),
+    carryoverText: joinNonEmpty([
+      previousDecision?.reason ? `previous routed reason: ${previousDecision.reason}` : "",
+      transcript?.carryoverText || "",
+      workspace?.summary ? `workspace summary: ${workspace.summary}` : ""
+    ])
+  };
+}
 
 function looksLikeShortStatusCheck(prompt, wordCount) {
   if (wordCount === 0 || wordCount > 12) return false;
@@ -206,6 +582,53 @@ function looksLikeShortStatusCheck(prompt, wordCount) {
     textIncludesAny(prompt, STATUS_PREFIX_PATTERNS) &&
     textIncludesAny(prompt, STATUS_ACTION_PATTERNS)
   );
+}
+
+function looksLikeShortFollowUp(prompt) {
+  const normalized = String(prompt || "").trim();
+  if (!normalized) return false;
+  const wordCount = normalized.split(/\s+/).length;
+  if (wordCount > 14) return false;
+  return (
+    normalized.endsWith("?") ||
+    looksLikeShortStatusCheck(normalized, wordCount) ||
+    /^(?:so|ok|okay|right|and|are|is|did|do|does|have|has|can|could|should|will|would)\b/i.test(normalized)
+  );
+}
+
+function routingContextLooksActive(routingContext) {
+  if (!routingContext) return false;
+  if (routingContext.workspace?.changedFileCount > 0) return true;
+  return textIncludesAny(
+    String(routingContext.carryoverText || ""),
+    FEATURE_GROUPS.flatMap((group) => group.patterns)
+  );
+}
+
+function maybeApplyCarryoverFloor(decision, prompt, routingContext) {
+  const previousEffort = routingContext?.previousDecision?.effort;
+  if (!previousEffort || !["high", "xhigh"].includes(previousEffort)) {
+    return decision;
+  }
+  if (!looksLikeShortFollowUp(prompt) || !routingContextLooksActive(routingContext)) {
+    return decision;
+  }
+  if ((EFFORT_RANK[decision.effort] ?? 0) >= EFFORT_RANK[previousEffort]) {
+    return decision;
+  }
+
+  return buildDecision({
+    effort: previousEffort,
+    planEffort: PLAN_EFFORT[previousEffort],
+    score: decision.score,
+    matchedSignals: [...decision.signals, "follow-up-carryover-floor"],
+    promptSnippet: decision.promptSnippet,
+    reason:
+      `${decision.reason} The router preserved ${previousEffort} because this is a short follow-up inside an active high-complexity thread with unfinished workspace state.`,
+    source: `${decision.source}-carryover`,
+    classifierModel: decision.classifierModel,
+    fallbackReason: decision.fallbackReason
+  });
 }
 
 function selectEffort(score, matchedSignals) {
@@ -221,13 +644,17 @@ function selectEffort(score, matchedSignals) {
   return "minimal";
 }
 
-function buildReason(prompt, effort, signals, score) {
+function buildReason(prompt, effort, signals, score, contextSummary = null) {
   const signalText = signals.length > 0 ? signals.join(", ") : "default-medium";
   const effortLabel = effort === "xhigh" ? "extra-high" : effort;
-  return (
+  const baseReason = (
     `The task shape routes to ${effortLabel} effort ` +
     `(score ${score}; signals: ${signalText}) based on the prompt: "${compactSnippet(prompt)}".`
   );
+  if (!contextSummary) {
+    return baseReason;
+  }
+  return `${baseReason} Context considered: ${compactSnippet(contextSummary)}.`;
 }
 
 function buildRouteBanner(effort) {
@@ -271,8 +698,11 @@ function buildDecision({
   };
 }
 
-export function routePromptHeuristic(prompt) {
+export function routePromptHeuristic(prompt, options = {}) {
   const rawPrompt = String(prompt || "").trim();
+  const routingContext = options.routingContext || null;
+  const carryoverText = String(routingContext?.carryoverText || "").trim();
+  const contextualText = joinNonEmpty([rawPrompt, carryoverText], "\n");
   const wordCount = rawPrompt ? rawPrompt.split(/\s+/).length : 0;
   const matchedSignals = [];
   let score = 3;
@@ -288,7 +718,7 @@ export function routePromptHeuristic(prompt) {
     });
   }
 
-  if (wordCount <= 8 && textIncludesAny(rawPrompt, MINIMAL_PATTERNS)) {
+  if (wordCount <= 8 && textIncludesAny(rawPrompt, MINIMAL_PATTERNS) && !carryoverText) {
     return buildDecision({
       effort: "minimal",
       planEffort: PLAN_EFFORT.minimal,
@@ -305,14 +735,44 @@ export function routePromptHeuristic(prompt) {
   }
 
   for (const group of FEATURE_GROUPS) {
-    if (textIncludesAny(rawPrompt, group.patterns)) {
+    if (textIncludesAny(contextualText, group.patterns)) {
       score += group.weight;
       matchedSignals.push(group.label);
     }
   }
 
+  if (carryoverText) {
+    matchedSignals.push("thread-context");
+    score += 1;
+  }
+
+  if (routingContext?.previousDecision?.effort === "high") {
+    matchedSignals.push("recent-high-effort");
+    score += 3;
+  } else if (routingContext?.previousDecision?.effort === "xhigh") {
+    matchedSignals.push("recent-xhigh-effort");
+    score += 6;
+  }
+
+  if (routingContext?.workspace?.changedFileCount >= 2) {
+    matchedSignals.push("dirty-worktree");
+    score += 1;
+  }
+  if (routingContext?.workspace?.changedFileCount >= 6) {
+    matchedSignals.push("wide-dirty-worktree");
+    score += 2;
+  }
+
   const hasElevatedRiskSignal = matchedSignals.some((signal) =>
-    ["high-impact", "research", "architecture", "multi-step", "complex-debugging"].includes(signal)
+    [
+      "high-impact",
+      "research",
+      "architecture",
+      "multi-step",
+      "complex-debugging",
+      "recent-high-effort",
+      "recent-xhigh-effort"
+    ].includes(signal)
   );
 
   if (!hasElevatedRiskSignal && looksLikeShortStatusCheck(rawPrompt, wordCount)) {
@@ -333,9 +793,16 @@ export function routePromptHeuristic(prompt) {
     matchedSignals.push("sequenced-work");
   }
 
+  if (
+    looksLikeShortStatusCheck(rawPrompt, wordCount) &&
+    (matchedSignals.includes("recent-high-effort") || matchedSignals.includes("recent-xhigh-effort"))
+  ) {
+    matchedSignals.push("follow-up-carryover");
+  }
+
   const effort = selectEffort(score, matchedSignals);
   const planEffort = PLAN_EFFORT[effort];
-  const reason = buildReason(rawPrompt, effort, matchedSignals, score);
+  const reason = buildReason(rawPrompt, effort, matchedSignals, score, routingContext?.summary || null);
 
   return buildDecision({
     effort,
@@ -347,13 +814,14 @@ export function routePromptHeuristic(prompt) {
   });
 }
 
-function buildCodexRoutingPrompt(prompt) {
+export function buildCodexRoutingPrompt(prompt, routingContext = null) {
   return [
     "You are a routing model for Codex.",
     "",
     "Choose the smallest reasoning effort that is still sufficient for the user's prompt.",
     "Be specific and decisive.",
-    "Base the decision on task shape, risk, ambiguity, verification burden, and scope.",
+    "Base the decision on task shape, risk, ambiguity, verification burden, scope, and any supplied thread/workspace context.",
+    "Do not classify the prompt in isolation if recent context shows ongoing work.",
     "",
     "Reasoning levels:",
     "- minimal: direct shell-like lookups or command-style requests with almost no judgment. Examples: \"what time is it\", \"pwd\", \"git status\", \"show me the version\".",
@@ -365,8 +833,17 @@ function buildCodexRoutingPrompt(prompt) {
     "Important rule: status questions like \"did you update the readme\" are low, not minimal.",
     "Important rule: reserve minimal only for direct command-like lookups with almost no judgment.",
     "Important rule: choose the smallest sufficient effort, not the fanciest one.",
+    "Important rule: if the latest prompt is a short follow-up inside an active refactor, debugging, migration, review, or architecture thread, keep the effort aligned to the ongoing work instead of downgrading just because the latest utterance is short.",
+    "Important rule: use only the context provided below. If no context is supplied, route from the prompt alone.",
+    "",
+    "Context handling guidance:",
+    "- OpenAI prompt guidance favors giving the model the relevant context it needs instead of making it guess missing state.",
+    "- OpenAI reasoning guidance favors the smallest sufficient effort, but that should be judged from the whole task context, not the final sentence alone.",
     "",
     "Return only the schema.",
+    "",
+    "Supplied context:",
+    routingContext?.summary || "(none)",
     "",
     "Prompt to classify:",
     JSON.stringify(String(prompt || ""))
@@ -403,47 +880,8 @@ function normalizeErrorMessage(error) {
 }
 
 function spawnCodex(args, options = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn("codex", args, {
-      cwd: options.cwd,
-      env: options.env,
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-
-    let stdout = "";
-    let stderr = "";
-    let finished = false;
-    const timeoutMs = options.timeoutMs ?? DEFAULT_CLASSIFIER_TIMEOUT_MS;
-    const timer = setTimeout(() => {
-      child.kill("SIGTERM");
-    }, timeoutMs);
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString("utf8");
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString("utf8");
-    });
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      if (finished) return;
-      finished = true;
-      reject(error);
-    });
-    child.on("exit", (code, signal) => {
-      clearTimeout(timer);
-      if (finished) return;
-      finished = true;
-      if (signal) {
-        reject(new Error(`codex router classifier terminated with signal ${signal}`));
-        return;
-      }
-      if (code !== 0) {
-        reject(new Error(stderr.trim() || stdout.trim() || `codex router classifier failed with exit code ${code}`));
-        return;
-      }
-      resolve({ stdout, stderr });
-    });
+  return runCommand("codex", args, options).catch((error) => {
+    throw new Error(`codex router classifier failed: ${normalizeErrorMessage(error)}`);
   });
 }
 
@@ -451,6 +889,7 @@ export async function classifyPromptWithCodex(prompt, options = {}) {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "codex-router-"));
   const schemaPath = path.join(tempDir, "schema.json");
   const outputPath = path.join(tempDir, "decision.json");
+  const routingContext = options.routingContext || null;
 
   try {
     await fs.writeFile(schemaPath, `${JSON.stringify(ROUTER_SCHEMA, null, 2)}\n`, "utf8");
@@ -477,7 +916,7 @@ export async function classifyPromptWithCodex(prompt, options = {}) {
       args.push("--model", options.classifierModel);
     }
 
-    args.push(buildCodexRoutingPrompt(prompt));
+    args.push(buildCodexRoutingPrompt(prompt, routingContext));
 
     await spawnCodex(args, {
       cwd: options.cwd || process.cwd(),
@@ -498,16 +937,23 @@ export async function classifyPromptWithCodex(prompt, options = {}) {
 
 export async function routePrompt(prompt, options = {}) {
   const mode = options.mode || process.env.CODEX_REASONING_ROUTER_MODE || DEFAULT_ROUTING_MODE;
+  const routingContext = options.routingContext || await collectRoutingContext(options);
 
   if (mode !== "heuristic") {
     try {
       const classifier = options.modelRouter || classifyPromptWithCodex;
-      return await classifier(prompt, options);
+      const decision = await classifier(prompt, {
+        ...options,
+        routingContext
+      });
+      return maybeApplyCarryoverFloor(decision, prompt, routingContext);
     } catch (error) {
       if (mode === "model-only") {
         throw error;
       }
-      const heuristicDecision = routePromptHeuristic(prompt);
+      const heuristicDecision = routePromptHeuristic(prompt, {
+        routingContext
+      });
       return buildDecision({
         effort: heuristicDecision.effort,
         planEffort: heuristicDecision.planEffort,
@@ -523,7 +969,9 @@ export async function routePrompt(prompt, options = {}) {
     }
   }
 
-  return routePromptHeuristic(prompt);
+  return routePromptHeuristic(prompt, {
+    routingContext
+  });
 }
 
 export function formatDecision(decision, format = "text") {

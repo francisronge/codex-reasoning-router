@@ -25,6 +25,7 @@ Default behavior:
 
 - Codex classifies the prompt before substantive work starts.
 - The router picks `minimal`, `low`, `medium`, `high`, or `xhigh`.
+- The router can consider recent thread context, prior routed effort, and current workspace state instead of treating the latest prompt in isolation.
 - The first real response shows the chosen effort as `[auto-route: ...]`.
 - On macOS, you can launch a menubar watcher that shows the latest route persistently.
 - If Codex desktop does not refresh the hook files in time, the watcher also has a send-time fallback that listens for Return, OCRs the visible composer, and classifies the prompt from the window itself.
