@@ -24,7 +24,7 @@ Once installed globally, the router works in Babel and any other repo you open w
 Default behavior:
 
 - Codex classifies the prompt before substantive work starts.
-- The router picks `minimal`, `low`, `medium`, `high`, or `xhigh`.
+- The router picks `low`, `medium`, `high`, or `xhigh`.
 - The router can consider recent thread context, prior routed effort, and current workspace state instead of treating the latest prompt in isolation.
 - The first real response shows the chosen effort as `[auto-route: ...]`.
 - On macOS, you can launch a menubar watcher that shows the latest route persistently.

@@ -102,8 +102,7 @@ On macOS, the menubar watcher uses two visibility sources:
 
 The model classifier chooses the smallest sufficient effort:
 
-- `minimal`: direct command-style lookups or tiny mechanical actions.
-- `low`: short bounded edits, status checks, rewrites, or straightforward questions.
+- `low`: the lightest supported Codex effort, for short bounded edits, status checks, rewrites, or straightforward questions.
 - `medium`: the default for ordinary coding tasks.
 - `high`: multi-step, dependency-aware, verification-heavy work.
 - `xhigh`: architecture, migration, security, or other high-impact tasks.
