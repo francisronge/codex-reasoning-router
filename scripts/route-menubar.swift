@@ -33,6 +33,7 @@ struct ClassifierRecord: Decodable {
 }
 
 final class RouteMenubarController: NSObject, NSApplicationDelegate {
+  private static let previewDefaultsKey = "codexReasoningRouter.previewEnabled"
   private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
   private let menu = NSMenu()
   private var timer: Timer?
@@ -49,11 +50,14 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
   private var lastSendTrigger = Date.distantPast
   private var eventTap: CFMachPort?
   private var eventSource: CFRunLoopSource?
+  private var previewToggleItem: NSMenuItem!
+  private var previewEnabled = true
 
   init(paths: [String], cliPath: String) {
     self.watchedPaths = paths
     self.cliPath = cliPath
     super.init()
+    self.previewEnabled = UserDefaults.standard.object(forKey: Self.previewDefaultsKey) as? Bool ?? true
   }
 
   func applicationDidFinishLaunching(_ notification: Notification) {
@@ -80,6 +84,12 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
     menu.addItem(sourceItem)
     menu.addItem(pathItem)
     menu.addItem(NSMenuItem.separator())
+
+    previewToggleItem = NSMenuItem(title: "", action: #selector(togglePreview), keyEquivalent: "")
+    previewToggleItem.target = self
+    previewToggleItem.state = previewEnabled ? .on : .off
+    updatePreviewToggleTitle()
+    menu.addItem(previewToggleItem)
 
     let refreshItem = NSMenuItem(title: "Refresh", action: #selector(refreshNow), keyEquivalent: "r")
     refreshItem.target = self
@@ -245,6 +255,9 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
   }
 
   private func handleKeyDown(_ event: CGEvent) {
+    guard previewEnabled else {
+      return
+    }
     guard frontmostBundleIdentifier() == "com.openai.codex" else {
       return
     }
@@ -398,6 +411,21 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
     ).trimmingCharacters(in: .whitespacesAndNewlines)
 
     return prompt.isEmpty ? nil : prompt
+  }
+
+  @objc private func togglePreview() {
+    previewEnabled.toggle()
+    UserDefaults.standard.set(previewEnabled, forKey: Self.previewDefaultsKey)
+    previewToggleItem.state = previewEnabled ? .on : .off
+    updatePreviewToggleTitle()
+    if !previewEnabled, previewState?.source == "screen-send" || previewState?.source == "screen-send-model" {
+      previewState = nil
+      refreshNow()
+    }
+  }
+
+  private func updatePreviewToggleTitle() {
+    previewToggleItem.title = previewEnabled ? "Turn Off Send Preview" : "Turn On Send Preview"
   }
 
   private func composerCropRect() -> CGRect? {
