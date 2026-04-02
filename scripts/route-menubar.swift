@@ -32,6 +32,12 @@ struct ClassifierRecord: Decodable {
   let source: String?
 }
 
+struct RouterControlRecord: Decodable {
+  let routerEnabled: Bool?
+  let updatedAt: String?
+  let source: String?
+}
+
 final class RouteMenubarController: NSObject, NSApplicationDelegate {
   private static let previewDefaultsKey = "codexReasoningRouter.previewEnabled"
   private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -39,11 +45,13 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
   private var timer: Timer?
   private var watchedPaths: [String] = []
   private let cliPath: String
+  private let controlPath: String
   private var lastSignature = ""
   private var promptTitleItem: NSMenuItem!
   private var effortItem: NSMenuItem!
   private var sourceItem: NSMenuItem!
   private var pathItem: NSMenuItem!
+  private var routerToggleItem: NSMenuItem!
   private var previewState: PreviewState?
   private var previewPromptFingerprint = ""
   private var classificationInFlight = false
@@ -56,6 +64,7 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
   init(paths: [String], cliPath: String) {
     self.watchedPaths = paths
     self.cliPath = cliPath
+    self.controlPath = "\(NSHomeDirectory())/.codex/state/codex-reasoning-router-control.json"
     super.init()
     self.previewEnabled = UserDefaults.standard.object(forKey: Self.previewDefaultsKey) as? Bool ?? true
   }
@@ -85,6 +94,10 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
     menu.addItem(pathItem)
     menu.addItem(NSMenuItem.separator())
 
+    routerToggleItem = NSMenuItem(title: "", action: #selector(toggleRouter), keyEquivalent: "")
+    routerToggleItem.target = self
+    menu.addItem(routerToggleItem)
+
     previewToggleItem = NSMenuItem(title: "", action: #selector(togglePreview), keyEquivalent: "")
     previewToggleItem.target = self
     previewToggleItem.state = previewEnabled ? .on : .off
@@ -107,6 +120,14 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
   }
 
   @objc private func refreshNow() {
+    let routerEnabled = isRouterEnabled()
+    updateRouterToggleTitle(routerEnabled: routerEnabled)
+
+    if !routerEnabled {
+      renderPaused()
+      return
+    }
+
     let hookState = latestHookState()
     let chosen = preferredState(hookState: hookState, preview: previewState)
 
@@ -138,6 +159,17 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
     effortItem.title = "Effort: \(effortDetail)"
     sourceItem.title = "Source: \(state.source)"
     pathItem.title = truncate("State file: \(state.pathLabel)", max: 72)
+  }
+
+  private func renderPaused() {
+    if let button = statusItem.button {
+      button.title = "CRR OFF"
+      button.toolTip = "codex-reasoning-router is paused"
+    }
+    promptTitleItem.title = "Prompt: router paused"
+    effortItem.title = "Effort: off"
+    sourceItem.title = "Source: paused"
+    pathItem.title = truncate("State file: \(controlPath)", max: 72)
   }
 
   private func preferredState(hookState: PreviewState?, preview: PreviewState?) -> PreviewState? {
@@ -255,6 +287,9 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
   }
 
   private func handleKeyDown(_ event: CGEvent) {
+    guard isRouterEnabled() else {
+      return
+    }
     guard previewEnabled else {
       return
     }
@@ -426,6 +461,41 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
 
   private func updatePreviewToggleTitle() {
     previewToggleItem.title = previewEnabled ? "Turn Off Send Preview" : "Turn On Send Preview"
+  }
+
+  @objc private func toggleRouter() {
+    let subcommand = isRouterEnabled() ? "pause" : "resume"
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    process.arguments = ["node", cliPath, "control", subcommand, "--json"]
+    process.standardOutput = Pipe()
+    process.standardError = Pipe()
+
+    do {
+      try process.run()
+      process.waitUntilExit()
+      guard process.terminationStatus == 0 else {
+        return
+      }
+      if subcommand == "pause" {
+        previewState = nil
+      }
+      refreshNow()
+    } catch {
+      return
+    }
+  }
+
+  private func updateRouterToggleTitle(routerEnabled: Bool) {
+    routerToggleItem.title = routerEnabled ? "Pause Router" : "Resume Router"
+  }
+
+  private func isRouterEnabled() -> Bool {
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: controlPath)),
+          let record = try? JSONDecoder().decode(RouterControlRecord.self, from: data) else {
+      return true
+    }
+    return record.routerEnabled != false
   }
 
   private func composerCropRect() -> CGRect? {

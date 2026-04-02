@@ -6,10 +6,12 @@ import { fileURLToPath } from "node:url";
 
 import {
   readGlobalReasoningConfig,
+  readRouterControlState,
   runPreToolUseHook,
   runSessionStartHook,
   runStopHook,
-  runUserPromptSubmitHook
+  runUserPromptSubmitHook,
+  writeRouterControlState
 } from "./hook.mjs";
 import { installIntoCodexDir } from "./install.mjs";
 import { formatDecision, routePrompt } from "./router.mjs";
@@ -29,6 +31,7 @@ function usage() {
     "  launch [--heuristic-router] [codex args...] -- \"prompt text\"",
     "  install [--scope global|project] [--root DIR]",
     "  menubar [--foreground] [--path FILE]...",
+    "  control status|pause|resume [--json]",
     ""
   ].join("\n");
 }
@@ -244,6 +247,37 @@ async function runMenubar(args) {
   }, null, 2)}\n`);
 }
 
+async function runControl(args) {
+  const subcommand = args.shift();
+  const format = hasFlag(args, "--json") ? "json" : "text";
+
+  let state;
+  if (subcommand === "status" || !subcommand) {
+    state = await readRouterControlState();
+  } else if (subcommand === "pause") {
+    state = await writeRouterControlState({
+      routerEnabled: false,
+      source: "cli-control"
+    });
+  } else if (subcommand === "resume") {
+    state = await writeRouterControlState({
+      routerEnabled: true,
+      source: "cli-control"
+    });
+  } else {
+    throw new Error('Supported control subcommands: "status", "pause", "resume".');
+  }
+
+  if (format === "json") {
+    process.stdout.write(`${JSON.stringify(state, null, 2)}\n`);
+    return;
+  }
+
+  process.stdout.write(
+    `router_enabled: ${state.routerEnabled !== false}\nupdated_at: ${state.updatedAt ?? "n/a"}\nsource: ${state.source ?? "unknown"}\n`
+  );
+}
+
 function readStdin() {
   return new Promise((resolve, reject) => {
     let data = "";
@@ -275,6 +309,9 @@ export async function main(argv) {
       return;
     case "menubar":
       await runMenubar(args);
+      return;
+    case "control":
+      await runControl(args);
       return;
     case "--help":
     case "-h":

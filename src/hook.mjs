@@ -24,6 +24,10 @@ function resolveStateDir(cwd) {
   return cwd ? path.join(cwd, ".codex", "state") : path.join(resolveCodexHome(), "state");
 }
 
+function controlStatePath() {
+  return path.join(resolveCodexHome(), "state", "codex-reasoning-router-control.json");
+}
+
 function sessionStatePath(cwd, sessionId) {
   const sessionKey = String(sessionId || "default").replace(/[^a-zA-Z0-9._-]/g, "_");
   return path.join(resolveStateDir(cwd), `codex-reasoning-router-session-${sessionKey}.json`);
@@ -104,6 +108,33 @@ async function appendTrace(logPath, payload) {
 async function writeLiveState(filePath, payload) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+}
+
+export async function readRouterControlState() {
+  const state = await readJson(controlStatePath(), null);
+  if (!state || typeof state !== "object") {
+    return {
+      routerEnabled: true,
+      updatedAt: null,
+      source: "default"
+    };
+  }
+  const routerEnabled = state.routerEnabled !== false && state.paused !== true;
+  return {
+    routerEnabled,
+    updatedAt: state.updatedAt || null,
+    source: state.source || "state-file"
+  };
+}
+
+export async function writeRouterControlState({ routerEnabled, source = "manual" }) {
+  const nextState = {
+    routerEnabled: routerEnabled !== false,
+    updatedAt: new Date().toISOString(),
+    source
+  };
+  await writeJson(controlStatePath(), nextState);
+  return nextState;
 }
 
 async function restoreStateConfig(state) {
@@ -190,9 +221,23 @@ export async function runUserPromptSubmitHook(stdinText, options = {}) {
   const payload = JSON.parse(stdinText || "{}");
   const prompt = String(payload.prompt || "");
   const config = await readGlobalReasoningConfig();
+  const control = await readRouterControlState();
   const statePath = sessionStatePath(payload.cwd, payload.session_id);
   const livePath = liveStatePath(payload.cwd);
   const existingState = await readJson(statePath, null);
+  if (!control.routerEnabled) {
+    await maybeRestoreLingeringSessionState(payload.cwd, payload.session_id, "router-paused");
+    await writeLiveState(livePath, {
+      timestamp: new Date().toISOString(),
+      cwd: payload.cwd || null,
+      sessionId: payload.session_id || null,
+      turnId: payload.turn_id || null,
+      prompt,
+      phase: "paused",
+      routerEnabled: false
+    });
+    return {};
+  }
   await writeLiveState(livePath, {
     timestamp: new Date().toISOString(),
     cwd: payload.cwd || null,
@@ -305,6 +350,10 @@ export async function runUserPromptSubmitHook(stdinText, options = {}) {
 
 export async function runPreToolUseHook(stdinText) {
   const payload = JSON.parse(stdinText || "{}");
+  const control = await readRouterControlState();
+  if (!control.routerEnabled) {
+    return {};
+  }
   const statePath = sessionStatePath(payload.cwd, payload.session_id);
   const state = await readJson(statePath, null);
 
@@ -328,8 +377,17 @@ export async function runPreToolUseHook(stdinText) {
 
 export async function runStopHook(stdinText) {
   const payload = JSON.parse(stdinText || "{}");
+  const control = await readRouterControlState();
   const statePath = sessionStatePath(payload.cwd, payload.session_id);
   const state = await readJson(statePath, null);
+
+  if (!control.routerEnabled) {
+    if (state?.previousEffort && state?.previousPlanEffort) {
+      await restoreStateConfig(state);
+      await markStateRestored(statePath, state, "router-paused");
+    }
+    return { decision: "continue" };
+  }
 
   if (!state) {
     return { decision: "continue" };
@@ -374,6 +432,7 @@ export async function runStopHook(stdinText) {
 
 export async function runSessionStartHook(stdinText) {
   const payload = JSON.parse(stdinText || "{}");
+  const control = await readRouterControlState();
   const restored = await restoreAnyLingeringStateInDir(
     resolveStateDir(payload.cwd),
     "session-start"
@@ -381,6 +440,10 @@ export async function runSessionStartHook(stdinText) {
 
   if (!restored) {
     await restoreAnyLingeringStateInDir(path.join(resolveCodexHome(), "state"), "session-start-home");
+  }
+
+  if (!control.routerEnabled) {
+    return {};
   }
 
   return {};
