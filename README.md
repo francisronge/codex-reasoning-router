@@ -19,6 +19,7 @@ By default, routing is model-based:
 - the local heuristic path only runs as a fallback if the model classifier is unavailable
 - the first substantive response includes a visible route banner such as `[auto-route: low]`
 - on macOS, the optional menubar watcher can show the latest route as `CRR LOW`, `CRR HIGH`, or `CRR XHIGH`
+- when hook files are stale in the desktop app, the menubar watcher can also listen for Return in Codex, OCR the visible composer, and classify the prompt at send-time
 
 ## Install
 
@@ -89,6 +90,11 @@ Launch the macOS menubar watcher for the current workspace:
 ```bash
 node ./bin/codex-reasoning-router.mjs menubar --path ./.codex/state/codex-reasoning-router-last-route.json
 ```
+
+On macOS, the menubar watcher uses two visibility sources:
+
+- hook state files when Codex updates them normally
+- a send-time Codex window fallback that listens for Return, OCRs the visible composer box, and classifies the prompt immediately
 
 ## Routing policy
 

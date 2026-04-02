@@ -1,5 +1,7 @@
 import AppKit
+import CoreGraphics
 import Foundation
+import Vision
 
 struct RouteRecord: Decodable {
   struct Decision: Decodable {
@@ -16,19 +18,41 @@ struct RouteRecord: Decodable {
   let decision: Decision?
 }
 
+struct PreviewState {
+  let timestamp: Date
+  let prompt: String
+  let effort: String?
+  let source: String
+  let pathLabel: String
+  let phase: String
+}
+
+struct ClassifierRecord: Decodable {
+  let effort: String
+  let source: String?
+}
+
 final class RouteMenubarController: NSObject, NSApplicationDelegate {
   private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
   private let menu = NSMenu()
   private var timer: Timer?
   private var watchedPaths: [String] = []
+  private let cliPath: String
   private var lastSignature = ""
   private var promptTitleItem: NSMenuItem!
   private var effortItem: NSMenuItem!
   private var sourceItem: NSMenuItem!
   private var pathItem: NSMenuItem!
+  private var previewState: PreviewState?
+  private var previewPromptFingerprint = ""
+  private var classificationInFlight = false
+  private var lastSendTrigger = Date.distantPast
+  private var eventTap: CFMachPort?
+  private var eventSource: CFRunLoopSource?
 
-  init(paths: [String]) {
+  init(paths: [String], cliPath: String) {
     self.watchedPaths = paths
+    self.cliPath = cliPath
     super.init()
   }
 
@@ -67,39 +91,75 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
 
     statusItem.menu = menu
 
+    installSendMonitor()
     refreshNow()
     timer = Timer.scheduledTimer(timeInterval: 0.15, target: self, selector: #selector(refreshNow), userInfo: nil, repeats: true)
   }
 
   @objc private func refreshNow() {
-    guard let best = latestRouteFile() else {
+    let hookState = latestHookState()
+    let chosen = preferredState(hookState: hookState, preview: previewState)
+
+    guard let chosen else {
+      render(nil)
+      return
+    }
+
+    render(chosen)
+  }
+
+  private func render(_ state: PreviewState?) {
+    guard let state else {
       setFallbackTitle()
       return
+    }
+
+    let effortTitle = state.phase == "routing"
+      ? "..."
+      : (state.effort?.uppercased() ?? "--")
+
+    if let button = statusItem.button {
+      button.title = "CRR \(effortTitle)"
+      button.toolTip = state.prompt
+    }
+
+    promptTitleItem.title = truncate("Prompt: \(state.prompt)", max: 72)
+    let effortDetail = state.phase == "routing" ? "routing..." : (state.effort ?? "--")
+    effortItem.title = "Effort: \(effortDetail)"
+    sourceItem.title = "Source: \(state.source)"
+    pathItem.title = truncate("State file: \(state.pathLabel)", max: 72)
+  }
+
+  private func preferredState(hookState: PreviewState?, preview: PreviewState?) -> PreviewState? {
+    switch (hookState, preview) {
+    case let (.some(hook), .some(preview)):
+      let previewIsFresh = Date().timeIntervalSince(preview.timestamp) < 15
+      if preview.phase == "routing" && previewIsFresh {
+        return preview
+      }
+      return preview.timestamp >= hook.timestamp ? preview : hook
+    case let (.some(hook), .none):
+      return hook
+    case let (.none, .some(preview)):
+      return Date().timeIntervalSince(preview.timestamp) < 15 ? preview : nil
+    case (.none, .none):
+      return nil
+    }
+  }
+
+  private func latestHookState() -> PreviewState? {
+    guard let best = latestRouteFile() else {
+      return nil
     }
 
     do {
       let data = try Data(contentsOf: URL(fileURLWithPath: best.path))
       let record = try JSONDecoder().decode(RouteRecord.self, from: data)
       let signature = "\(best.path)|\(best.modified.timeIntervalSince1970)"
-
       let prompt = record.decision?.promptSnippet ?? record.prompt ?? "No prompt"
       let cwd = record.cwd ?? URL(fileURLWithPath: best.path).deletingLastPathComponent().path
       let phase = record.phase ?? "selected"
-      let effort = phase == "routing"
-        ? "..."
-        : (record.decision?.effort.uppercased() ?? "--")
       let source = record.decision?.source ?? (phase == "routing" ? "routing" : "unknown")
-
-      if let button = statusItem.button {
-        button.title = "CRR \(effort)"
-        button.toolTip = prompt
-      }
-
-      promptTitleItem.title = truncate("Prompt: \(prompt)", max: 72)
-      let effortDetail = phase == "routing" ? "routing..." : (record.decision?.effort ?? "--")
-      effortItem.title = "Effort: \(effortDetail)"
-      sourceItem.title = "Source: \(source)"
-      pathItem.title = truncate("State file: \(cwd)", max: 72)
 
       if signature != lastSignature {
         lastSignature = signature
@@ -107,8 +167,17 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
           showNotification(effort: finalEffort, prompt: prompt)
         }
       }
+
+      return PreviewState(
+        timestamp: best.modified,
+        prompt: prompt,
+        effort: record.decision?.effort,
+        source: source,
+        pathLabel: cwd,
+        phase: phase
+      )
     } catch {
-      setFallbackTitle()
+      return nil
     }
   }
 
@@ -143,6 +212,225 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
     }
     let index = value.index(value.startIndex, offsetBy: max - 1)
     return "\(value[..<index])…"
+  }
+
+  private func installSendMonitor() {
+    let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
+    guard let tap = CGEvent.tapCreate(
+      tap: .cgSessionEventTap,
+      place: .headInsertEventTap,
+      options: .listenOnly,
+      eventsOfInterest: mask,
+      callback: { _, type, event, userInfo in
+        guard type == .keyDown else { return Unmanaged.passUnretained(event) }
+        guard let userInfo else { return Unmanaged.passUnretained(event) }
+        let controller = Unmanaged<RouteMenubarController>.fromOpaque(userInfo).takeUnretainedValue()
+        controller.handleKeyDown(event)
+        return Unmanaged.passUnretained(event)
+      },
+      userInfo: Unmanaged.passUnretained(self).toOpaque()
+    ) else {
+      sourceItem.title = "Source: input monitor unavailable"
+      return
+    }
+
+    eventTap = tap
+    guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
+      sourceItem.title = "Source: input monitor unavailable"
+      return
+    }
+    eventSource = source
+    CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+    CGEvent.tapEnable(tap: tap, enable: true)
+  }
+
+  private func handleKeyDown(_ event: CGEvent) {
+    guard frontmostBundleIdentifier() == "com.openai.codex" else {
+      return
+    }
+
+    let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+    guard keyCode == 36 || keyCode == 76 else {
+      return
+    }
+
+    let now = Date()
+    guard now.timeIntervalSince(lastSendTrigger) > 0.35 else {
+      return
+    }
+    lastSendTrigger = now
+
+    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+      self?.captureAndClassifyVisiblePrompt()
+    }
+  }
+
+  private func captureAndClassifyVisiblePrompt() {
+    guard let prompt = captureVisiblePrompt() else {
+      return
+    }
+
+    let fingerprint = prompt.lowercased()
+    guard fingerprint != previewPromptFingerprint || Date().timeIntervalSince(lastSendTrigger) < 2 else {
+      return
+    }
+    previewPromptFingerprint = fingerprint
+
+    let pending = PreviewState(
+      timestamp: Date(),
+      prompt: prompt,
+      effort: nil,
+      source: "screen-send",
+      pathLabel: "Codex window OCR",
+      phase: "routing"
+    )
+    DispatchQueue.main.async { [weak self] in
+      self?.previewState = pending
+      self?.classificationInFlight = true
+      self?.refreshNow()
+    }
+
+    let result = classifyPrompt(prompt)
+    DispatchQueue.main.async { [weak self] in
+      guard let self else { return }
+      self.classificationInFlight = false
+      guard let result else {
+        self.previewState = nil
+        self.refreshNow()
+        return
+      }
+      self.previewState = PreviewState(
+        timestamp: Date(),
+        prompt: prompt,
+        effort: result.effort,
+        source: result.source ?? "screen-send-model",
+        pathLabel: "Codex window OCR",
+        phase: "selected"
+      )
+      self.refreshNow()
+    }
+  }
+
+  private func classifyPrompt(_ prompt: String) -> ClassifierRecord? {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    process.arguments = ["node", cliPath, "classify", "--prompt", prompt, "--json"]
+
+    let stdout = Pipe()
+    let stderr = Pipe()
+    process.standardOutput = stdout
+    process.standardError = stderr
+
+    do {
+      try process.run()
+      process.waitUntilExit()
+      guard process.terminationStatus == 0 else {
+        return nil
+      }
+      let data = stdout.fileHandleForReading.readDataToEndOfFile()
+      return try JSONDecoder().decode(ClassifierRecord.self, from: data)
+    } catch {
+      return nil
+    }
+  }
+
+  private func captureVisiblePrompt() -> String? {
+    guard let crop = composerCropRect() else {
+      return nil
+    }
+    guard let image = CGWindowListCreateImage(crop, .optionOnScreenOnly, kCGNullWindowID, [.bestResolution, .boundsIgnoreFraming]) else {
+      return nil
+    }
+
+    let request = VNRecognizeTextRequest()
+    request.recognitionLevel = .accurate
+    request.usesLanguageCorrection = true
+
+    let handler = VNImageRequestHandler(cgImage: image, options: [:])
+    do {
+      try handler.perform([request])
+    } catch {
+      return nil
+    }
+
+    let ignoredExact = Set([
+      "Ask for follow-up changes"
+    ])
+    let ignoredContains = [
+      "GPT-5.4",
+      "High",
+      "Low",
+      "Medium",
+      "Extra High",
+      "Local",
+      "Default permissions",
+      "Upgrade",
+      "Add Credits",
+      "You're out of Codex messages",
+      "Your rate limit resets",
+      "Pro today."
+    ]
+
+    let observations = request.results ?? []
+    let promptLines = observations.compactMap { observation -> (Double, String)? in
+      guard let candidate = observation.topCandidates(1).first?.string.trimmingCharacters(in: .whitespacesAndNewlines),
+            !candidate.isEmpty else {
+        return nil
+      }
+      if observation.boundingBox.origin.y < 0.15 {
+        return nil
+      }
+      if ignoredExact.contains(candidate) {
+        return nil
+      }
+      if ignoredContains.contains(where: { candidate.localizedCaseInsensitiveContains($0) }) {
+        return nil
+      }
+      return (Double(observation.boundingBox.origin.y), candidate)
+    }
+      .sorted(by: { $0.0 > $1.0 })
+      .map(\.1)
+
+    let prompt = promptLines.joined(separator: " ").replacingOccurrences(
+      of: "\\s+",
+      with: " ",
+      options: .regularExpression
+    ).trimmingCharacters(in: .whitespacesAndNewlines)
+
+    return prompt.isEmpty ? nil : prompt
+  }
+
+  private func composerCropRect() -> CGRect? {
+    let options = CGWindowListOption(arrayLiteral: .optionOnScreenOnly, .excludeDesktopElements)
+    let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] ?? []
+
+    guard let entry = windows.first(where: { info in
+      let owner = info[kCGWindowOwnerName as String] as? String ?? ""
+      let title = info[kCGWindowName as String] as? String ?? ""
+      let layer = info[kCGWindowLayer as String] as? Int ?? -1
+      return layer == 0 && (owner.localizedCaseInsensitiveContains("Codex") || title.localizedCaseInsensitiveContains("Codex"))
+    }) else {
+      return nil
+    }
+
+    guard let bounds = entry[kCGWindowBounds as String] as? [String: CGFloat],
+          let x = bounds["X"],
+          let y = bounds["Y"],
+          let width = bounds["Width"],
+          let height = bounds["Height"] else {
+      return nil
+    }
+
+    return CGRect(
+      x: x + width * 0.22,
+      y: y + height * 0.80,
+      width: width * 0.76,
+      height: height * 0.13
+    )
+  }
+
+  private func frontmostBundleIdentifier() -> String? {
+    NSWorkspace.shared.frontmostApplication?.bundleIdentifier
   }
 
   private func showNotification(effort: String, prompt: String) {
@@ -181,7 +469,11 @@ if paths.isEmpty {
   ]
 }
 
+let scriptPath = URL(fileURLWithPath: CommandLine.arguments[0])
+let repoRoot = scriptPath.deletingLastPathComponent().deletingLastPathComponent().path
+let cliPath = "\(repoRoot)/bin/codex-reasoning-router.mjs"
+
 let app = NSApplication.shared
-let delegate = RouteMenubarController(paths: paths)
+let delegate = RouteMenubarController(paths: paths, cliPath: cliPath)
 app.delegate = delegate
 app.run()
