@@ -1,6 +1,8 @@
 import AppKit
 import CoreGraphics
 import Foundation
+import ScreenCaptureKit
+import UserNotifications
 import Vision
 
 struct RouteRecord: Decodable {
@@ -12,10 +14,12 @@ struct RouteRecord: Decodable {
   }
 
   let timestamp: String?
+  let updatedAt: String?
   let cwd: String?
   let phase: String?
   let prompt: String?
   let decision: Decision?
+  let lastDecision: Decision?
 }
 
 struct PreviewState {
@@ -25,6 +29,12 @@ struct PreviewState {
   let source: String
   let pathLabel: String
   let phase: String
+}
+
+struct CodexWindowTarget {
+  let windowID: CGWindowID
+  let windowBounds: CGRect
+  let cropRect: CGRect
 }
 
 struct ClassifierRecord: Decodable {
@@ -46,6 +56,7 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
   private var watchedPaths: [String] = []
   private let cliPath: String
   private let controlPath: String
+  private let workspaceRoot: String
   private var lastSignature = ""
   private var promptTitleItem: NSMenuItem!
   private var effortItem: NSMenuItem!
@@ -54,7 +65,6 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
   private var routerToggleItem: NSMenuItem!
   private var previewState: PreviewState?
   private var previewPromptFingerprint = ""
-  private var classificationInFlight = false
   private var lastSendTrigger = Date.distantPast
   private var eventTap: CFMachPort?
   private var eventSource: CFRunLoopSource?
@@ -65,8 +75,24 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
     self.watchedPaths = paths
     self.cliPath = cliPath
     self.controlPath = "\(NSHomeDirectory())/.codex/state/codex-reasoning-router-control.json"
+    self.workspaceRoot = Self.resolveWorkspaceRoot(from: paths)
     super.init()
     self.previewEnabled = UserDefaults.standard.object(forKey: Self.previewDefaultsKey) as? Bool ?? true
+  }
+
+  private static func resolveWorkspaceRoot(from paths: [String]) -> String {
+    for watchedPath in paths {
+      let expanded = NSString(string: watchedPath).expandingTildeInPath
+      if expanded.hasPrefix("\(NSHomeDirectory())/.codex/state/") {
+        continue
+      }
+      if let range = expanded.range(of: "/.codex/state/") {
+        return String(expanded[..<range.lowerBound])
+      }
+    }
+
+    let cwd = FileManager.default.currentDirectoryPath
+    return cwd.isEmpty ? NSHomeDirectory() : cwd
   }
 
   func applicationDidFinishLaunching(_ notification: Notification) {
@@ -198,14 +224,15 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
       let data = try Data(contentsOf: URL(fileURLWithPath: best.path))
       let record = try JSONDecoder().decode(RouteRecord.self, from: data)
       let signature = "\(best.path)|\(best.modified.timeIntervalSince1970)"
-      let prompt = record.decision?.promptSnippet ?? record.prompt ?? "No prompt"
+      let resolvedDecision = record.decision ?? record.lastDecision
+      let prompt = resolvedDecision?.promptSnippet ?? record.prompt ?? "No prompt"
       let cwd = record.cwd ?? URL(fileURLWithPath: best.path).deletingLastPathComponent().path
       let phase = record.phase ?? "selected"
-      let source = record.decision?.source ?? (phase == "routing" ? "routing" : "unknown")
+      let source = resolvedDecision?.source ?? (phase == "routing" ? "routing" : "unknown")
 
       if signature != lastSignature {
         lastSignature = signature
-        if phase != "routing", let finalEffort = record.decision?.effort {
+        if phase != "routing", let finalEffort = resolvedDecision?.effort {
           showNotification(effort: finalEffort, prompt: prompt)
         }
       }
@@ -213,7 +240,7 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
       return PreviewState(
         timestamp: best.modified,
         prompt: prompt,
-        effort: record.decision?.effort,
+        effort: resolvedDecision?.effort,
         source: source,
         pathLabel: cwd,
         phase: phase
@@ -328,20 +355,18 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
       timestamp: Date(),
       prompt: prompt,
       effort: nil,
-      source: "screen-send",
-      pathLabel: "Codex window OCR",
+      source: "screen-send-preview",
+      pathLabel: workspaceRoot,
       phase: "routing"
     )
     DispatchQueue.main.async { [weak self] in
       self?.previewState = pending
-      self?.classificationInFlight = true
       self?.refreshNow()
     }
 
     let result = classifyPrompt(prompt)
     DispatchQueue.main.async { [weak self] in
       guard let self else { return }
-      self.classificationInFlight = false
       guard let result else {
         self.previewState = nil
         self.refreshNow()
@@ -352,7 +377,7 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
         prompt: prompt,
         effort: result.effort,
         source: result.source ?? "screen-send-model",
-        pathLabel: "Codex window OCR",
+        pathLabel: self.workspaceRoot,
         phase: "selected"
       )
       self.refreshNow()
@@ -362,7 +387,8 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
   private func classifyPrompt(_ prompt: String) -> ClassifierRecord? {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-    process.arguments = ["node", cliPath, "classify", "--prompt", prompt, "--json"]
+    process.currentDirectoryURL = URL(fileURLWithPath: workspaceRoot)
+    process.arguments = ["node", cliPath, "classify", "--cwd", workspaceRoot, "--prompt", prompt, "--json"]
 
     let stdout = Pipe()
     let stderr = Pipe()
@@ -383,10 +409,10 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
   }
 
   private func captureVisiblePrompt() -> String? {
-    guard let crop = composerCropRect() else {
+    guard let target = composerCaptureTarget() else {
       return nil
     }
-    guard let image = CGWindowListCreateImage(crop, .optionOnScreenOnly, kCGNullWindowID, [.bestResolution, .boundsIgnoreFraming]) else {
+    guard let image = capturePromptImage(target) else {
       return nil
     }
 
@@ -448,12 +474,56 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
     return prompt.isEmpty ? nil : prompt
   }
 
+  private func capturePromptImage(_ target: CodexWindowTarget) -> CGImage? {
+    let semaphore = DispatchSemaphore(value: 0)
+    var capturedImage: CGImage?
+
+    SCShareableContent.getExcludingDesktopWindows(true, onScreenWindowsOnly: true) {
+      shareableContent, error in
+      guard error == nil, let shareableContent else {
+        semaphore.signal()
+        return
+      }
+      guard let window = shareableContent.windows.first(where: { $0.windowID == target.windowID }) else {
+        semaphore.signal()
+        return
+      }
+
+      let filter = SCContentFilter(desktopIndependentWindow: window)
+      let relativeCrop = CGRect(
+        x: max(0, target.cropRect.origin.x - target.windowBounds.origin.x),
+        y: max(0, target.cropRect.origin.y - target.windowBounds.origin.y),
+        width: min(target.cropRect.width, target.windowBounds.width),
+        height: min(target.cropRect.height, target.windowBounds.height)
+      )
+
+      let configuration = SCStreamConfiguration()
+      let pointScale = max(CGFloat(filter.pointPixelScale), 1)
+      configuration.sourceRect = relativeCrop
+      configuration.width = max(1, Int(relativeCrop.width * pointScale))
+      configuration.height = max(1, Int(relativeCrop.height * pointScale))
+      configuration.scalesToFit = false
+      configuration.showsCursor = false
+
+      SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration) { image, captureError in
+        if captureError == nil {
+          capturedImage = image
+        }
+        semaphore.signal()
+      }
+    }
+
+    _ = semaphore.wait(timeout: .now() + 2)
+    return capturedImage
+  }
+
   @objc private func togglePreview() {
     previewEnabled.toggle()
     UserDefaults.standard.set(previewEnabled, forKey: Self.previewDefaultsKey)
     previewToggleItem.state = previewEnabled ? .on : .off
     updatePreviewToggleTitle()
-    if !previewEnabled, previewState?.source == "screen-send" || previewState?.source == "screen-send-model" {
+    if !previewEnabled,
+       previewState?.source == "screen-send-preview" || previewState?.source == "screen-send-model" {
       previewState = nil
       refreshNow()
     }
@@ -498,7 +568,7 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
     return record.routerEnabled != false
   }
 
-  private func composerCropRect() -> CGRect? {
+  private func composerCaptureTarget() -> CodexWindowTarget? {
     let options = CGWindowListOption(arrayLiteral: .optionOnScreenOnly, .excludeDesktopElements)
     let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] ?? []
 
@@ -519,11 +589,24 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
       return nil
     }
 
-    return CGRect(
+    let windowIDValue = entry[kCGWindowNumber as String] as? NSNumber
+    let windowID = CGWindowID(windowIDValue?.uint32Value ?? 0)
+    let windowBounds = CGRect(x: x, y: y, width: width, height: height)
+    let cropRect = CGRect(
       x: x + width * 0.22,
       y: y + height * 0.80,
       width: width * 0.76,
       height: height * 0.13
+    )
+
+    guard windowID != 0 else {
+      return nil
+    }
+
+    return CodexWindowTarget(
+      windowID: windowID,
+      windowBounds: windowBounds,
+      cropRect: cropRect
     )
   }
 
@@ -532,10 +615,16 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
   }
 
   private func showNotification(effort: String, prompt: String) {
-    let notification = NSUserNotification()
-    notification.title = "Codex route: \(effort)"
-    notification.informativeText = truncate(prompt, max: 120)
-    NSUserNotificationCenter.default.deliver(notification)
+    let content = UNMutableNotificationContent()
+    content.title = "Codex route: \(effort)"
+    content.body = truncate(prompt, max: 120)
+
+    let request = UNNotificationRequest(
+      identifier: "codex-reasoning-router.route",
+      content: content,
+      trigger: nil
+    )
+    UNUserNotificationCenter.current().add(request)
   }
 
   @objc private func quitApp() {
@@ -562,8 +651,10 @@ if paths.isEmpty {
   paths = [
     "\(cwd)/.codex/state/codex-reasoning-router-live.json",
     "\(cwd)/.codex/state/codex-reasoning-router-last-route.json",
+    "\(cwd)/.codex/state/codex-reasoning-router-active-session.json",
     "\(NSHomeDirectory())/.codex/state/codex-reasoning-router-live.json",
-    "\(NSHomeDirectory())/.codex/state/codex-reasoning-router-last-route.json"
+    "\(NSHomeDirectory())/.codex/state/codex-reasoning-router-last-route.json",
+    "\(NSHomeDirectory())/.codex/state/codex-reasoning-router-active-session.json"
   ]
 }
 

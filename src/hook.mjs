@@ -16,6 +16,11 @@ function liveStatePath(cwd) {
   return path.join(baseDir, "codex-reasoning-router-live.json");
 }
 
+function activeSessionPath(cwd) {
+  const baseDir = cwd ? path.join(cwd, ".codex", "state") : path.join(resolveCodexHome(), "state");
+  return path.join(baseDir, "codex-reasoning-router-active-session.json");
+}
+
 function resolveCodexHome() {
   return process.env.CODEX_HOME ? path.resolve(process.env.CODEX_HOME) : path.join(os.homedir(), ".codex");
 }
@@ -108,6 +113,10 @@ async function appendTrace(logPath, payload) {
 async function writeLiveState(filePath, payload) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+}
+
+async function writeActiveSessionState(cwd, payload) {
+  await writeJson(activeSessionPath(cwd), payload);
 }
 
 export async function readRouterControlState() {
@@ -236,6 +245,17 @@ export async function runUserPromptSubmitHook(stdinText, options = {}) {
       phase: "paused",
       routerEnabled: false
     });
+    await writeActiveSessionState(payload.cwd, {
+      updatedAt: new Date().toISOString(),
+      cwd: payload.cwd || null,
+      sessionId: payload.session_id || null,
+      turnId: payload.turn_id || null,
+      transcriptPath: payload.transcript_path || null,
+      prompt,
+      phase: "paused",
+      routerEnabled: false,
+      lastDecision: existingState?.decision || null
+    });
     return {};
   }
   await writeLiveState(livePath, {
@@ -243,8 +263,20 @@ export async function runUserPromptSubmitHook(stdinText, options = {}) {
     cwd: payload.cwd || null,
     sessionId: payload.session_id || null,
     turnId: payload.turn_id || null,
+    transcriptPath: payload.transcript_path || null,
     prompt,
     phase: "routing"
+  });
+  await writeActiveSessionState(payload.cwd, {
+    updatedAt: new Date().toISOString(),
+    cwd: payload.cwd || null,
+    sessionId: payload.session_id || null,
+    turnId: payload.turn_id || null,
+    transcriptPath: payload.transcript_path || null,
+    prompt,
+    phase: "routing",
+    routerEnabled: true,
+    lastDecision: existingState?.decision || null
   });
   if (existingState?.phase !== "replay_pending") {
     await maybeRestoreLingeringSessionState(payload.cwd, payload.session_id, "next-user-prompt");
@@ -260,6 +292,7 @@ export async function runUserPromptSubmitHook(stdinText, options = {}) {
     const replayState = {
       ...currentState,
       turnId: payload.turn_id || currentState.turnId || null,
+      transcriptPath: payload.transcript_path || currentState.transcriptPath || null,
       phase: "replay_active"
     };
     await writeJson(statePath, replayState);
@@ -279,9 +312,22 @@ export async function runUserPromptSubmitHook(stdinText, options = {}) {
       cwd: payload.cwd || null,
       sessionId: payload.session_id || null,
       turnId: payload.turn_id || null,
+      transcriptPath: replayState.transcriptPath || null,
       prompt,
       phase: "selected",
       decision: replayState.decision
+    });
+    await writeActiveSessionState(payload.cwd, {
+      updatedAt: new Date().toISOString(),
+      cwd: payload.cwd || null,
+      sessionId: payload.session_id || null,
+      turnId: payload.turn_id || null,
+      transcriptPath: replayState.transcriptPath || null,
+      prompt,
+      phase: "selected",
+      routerEnabled: true,
+      lastDecision: replayState.decision,
+      sessionStatePath: statePath
     });
     return {
       hookSpecificOutput: {
@@ -309,6 +355,7 @@ export async function runUserPromptSubmitHook(stdinText, options = {}) {
     sessionId: payload.session_id || null,
     cwd: payload.cwd || null,
     turnId: payload.turn_id || null,
+    transcriptPath: payload.transcript_path || currentState?.transcriptPath || null,
     originalPrompt: prompt,
     decision,
     previousEffort: currentEffort,
@@ -335,9 +382,22 @@ export async function runUserPromptSubmitHook(stdinText, options = {}) {
     cwd: payload.cwd || null,
     sessionId: payload.session_id || null,
     turnId: payload.turn_id || null,
+    transcriptPath: payload.transcript_path || null,
     prompt,
     phase: needsReplay ? "selected" : "direct",
     decision
+  });
+  await writeActiveSessionState(payload.cwd, {
+    updatedAt: new Date().toISOString(),
+    cwd: payload.cwd || null,
+    sessionId: payload.session_id || null,
+    turnId: payload.turn_id || null,
+    transcriptPath: payload.transcript_path || null,
+    prompt,
+    phase: needsReplay ? "selected" : "direct",
+    routerEnabled: true,
+    lastDecision: decision,
+    sessionStatePath: statePath
   });
 
   return {
@@ -402,6 +462,18 @@ export async function runStopHook(stdinText) {
       ...state,
       phase: "replay_pending"
     });
+    await writeActiveSessionState(payload.cwd, {
+      updatedAt: new Date().toISOString(),
+      cwd: state.cwd || payload.cwd || null,
+      sessionId: state.sessionId || payload.session_id || null,
+      turnId: state.turnId || null,
+      transcriptPath: state.transcriptPath || null,
+      prompt: state.originalPrompt || null,
+      phase: "replay_pending",
+      routerEnabled: true,
+      lastDecision: state.decision,
+      sessionStatePath: statePath
+    });
     return {
       decision: "block",
       reason: buildReplayPrompt(state)
@@ -417,6 +489,18 @@ export async function runStopHook(stdinText) {
       ...state,
       phase: "done",
       completedAt: new Date().toISOString()
+    });
+    await writeActiveSessionState(payload.cwd, {
+      updatedAt: new Date().toISOString(),
+      cwd: state.cwd || payload.cwd || null,
+      sessionId: state.sessionId || payload.session_id || null,
+      turnId: state.turnId || null,
+      transcriptPath: state.transcriptPath || null,
+      prompt: state.originalPrompt || null,
+      phase: "done",
+      routerEnabled: true,
+      lastDecision: state.decision,
+      sessionStatePath: statePath
     });
     return { decision: "continue" };
   }

@@ -26,7 +26,7 @@ function usage() {
     "codex-reasoning-router",
     "",
     "Commands:",
-    "  classify [--heuristic] --prompt \"...\" [--json]",
+    "  classify [--heuristic] [--cwd DIR] --prompt \"...\" [--json]",
     "  hook user-prompt-submit",
     "  launch [--heuristic-router] [codex args...] -- \"prompt text\"",
     "  install [--scope global|project] [--root DIR]",
@@ -95,11 +95,12 @@ function hasReasoningOverride(args) {
 
 async function runClassify(args) {
   const prompt = parseFlag(args, "--prompt") || args.join(" ");
+  const cwd = parseFlag(args, "--cwd") || process.cwd();
   const format = hasFlag(args, "--json") ? "json" : "text";
   const mode = hasFlag(args, "--heuristic") ? "heuristic" : undefined;
   const config = await readGlobalReasoningConfig();
   const decision = await routePrompt(prompt, {
-    cwd: process.cwd(),
+    cwd,
     mode,
     classifierModel: config.model || undefined
   });
@@ -204,7 +205,10 @@ async function runMenubar(args) {
       const livePath = resolved.endsWith("codex-reasoning-router-last-route.json")
         ? resolved.replace(/codex-reasoning-router-last-route\.json$/, "codex-reasoning-router-live.json")
         : null;
-      return livePath ? [livePath, resolved] : [resolved];
+      const activeSessionPath = resolved.endsWith("codex-reasoning-router-last-route.json")
+        ? resolved.replace(/codex-reasoning-router-last-route\.json$/, "codex-reasoning-router-active-session.json")
+        : null;
+      return [resolved, livePath, activeSessionPath].filter(Boolean);
     })))
     : [];
   const spawnedArgs = [scriptPath];

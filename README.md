@@ -18,10 +18,10 @@ By default, routing is model-based:
 
 - the router asks Codex itself to classify the prompt with a schema-constrained output
 - the local heuristic path only runs as a fallback if the model classifier is unavailable
-- the router can include recent Codex thread context, prior routed effort, and current workspace state when choosing effort
+- the router can include exact active-session transcript context, prior routed effort, and current workspace state when choosing effort
 - the first substantive response includes a visible route banner such as `[auto-route: low]`
 - on macOS, the optional menubar watcher can show the latest route as `CRR LOW`, `CRR HIGH`, or `CRR XHIGH`
-- when hook files are stale in the desktop app, the menubar watcher can also listen for Return in Codex, OCR the visible composer, and classify the prompt at send-time
+- when hook files are stale in the desktop app, the menubar watcher can also listen for Return in Codex, OCR the visible composer, and classify the prompt at send-time using the router's last exact session binding for that workspace
 
 ## Install
 
@@ -110,8 +110,8 @@ The model classifier chooses the smallest sufficient effort:
 Routing is context-aware, not prompt-only:
 
 - a short follow-up can stay `high` or `xhigh` if the current Codex thread is still in the middle of a refactor, investigation, migration, or other complex work
-- the hook path can read recent Codex transcript context from `transcript_path`
-- the router also inspects current workspace state such as a dirty git worktree
+- the hook path records the exact `transcript_path` for the active session instead of guessing the latest thread by cwd alone
+- the router also inspects current workspace state such as a dirty git worktree, staged changes, and diff volume
 - the session carryover path can preserve a previous `high` or `xhigh` decision for terse follow-ups until the active thread settles
 
 The fallback heuristic looks at signals like:
@@ -138,6 +138,10 @@ The router also writes a trace file to:
 
 - `<cwd>/.codex/state/codex-reasoning-router-last-route.json`
 - or `~/.codex/state/...` if no cwd is present
+
+It also maintains per-workspace active-session state at:
+
+- `<cwd>/.codex/state/codex-reasoning-router-active-session.json`
 
 ## Release Flow
 

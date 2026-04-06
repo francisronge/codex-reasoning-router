@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 
-const MINIMAL_PATTERNS = [
+const DIRECT_LOOKUP_PATTERNS = [
   /\bwhat(?:'s| is) the time\b/i,
   /\bwhat time is it\b/i,
   /\bcurrent time\b/i,
@@ -151,8 +151,62 @@ const FEATURE_GROUPS = [
   }
 ];
 
+const THREAD_ACTIVITY_GROUPS = [
+  {
+    label: "active-refactor",
+    patterns: [
+      /\brefactor\b/i,
+      /\brestructure\b/i,
+      /\brework\b/i,
+      /\brewrite\b/i,
+      /\breorganize\b/i
+    ]
+  },
+  {
+    label: "active-debug",
+    patterns: [
+      /\bdebug\b/i,
+      /\broot cause\b/i,
+      /\bblocker\b/i,
+      /\bregression\b/i,
+      /\bfail(?:ing|ed|ure)?\b/i,
+      /\binvalid[_ -]?request\b/i
+    ]
+  },
+  {
+    label: "active-verification",
+    patterns: [
+      /\btest(?:s|ing)?\b/i,
+      /\bverify\b/i,
+      /\bvalidate\b/i,
+      /\bprove\b/i,
+      /\bassert(?:ion)?\b/i
+    ]
+  },
+  {
+    label: "active-migration",
+    patterns: [
+      /\bmigration(?:s)?\b/i,
+      /\bupgrade\b/i,
+      /\brollout\b/i,
+      /\bbackfill\b/i,
+      /\bcutover\b/i
+    ]
+  },
+  {
+    label: "active-architecture",
+    patterns: [
+      /\bdesign\b/i,
+      /\barchitecture\b/i,
+      /\bsystem\b/i,
+      /\bworkflow\b/i,
+      /\brouter\b/i,
+      /\bplatform\b/i
+    ]
+  }
+];
+
 const EFFORT_GUIDANCE = {
-  minimal: "Use the fastest path. Avoid exploratory work unless the task unexpectedly widens.",
   low: "Keep the loop tight. Prefer direct edits, bounded reads, and minimal branching.",
   medium: "Default coding posture. Explore enough to avoid blind edits, then execute and verify.",
   high: "Use dependency-aware reasoning. Inspect surrounding systems, stage the work, and verify carefully.",
@@ -160,7 +214,6 @@ const EFFORT_GUIDANCE = {
 };
 
 const PLAN_EFFORT = {
-  minimal: "medium",
   low: "medium",
   medium: "high",
   high: "xhigh",
@@ -172,7 +225,7 @@ const ROUTER_SCHEMA = {
   properties: {
     effort: {
       type: "string",
-      enum: ["minimal", "low", "medium", "high", "xhigh"]
+      enum: ["low", "medium", "high", "xhigh"]
     },
     planEffort: {
       type: "string",
@@ -198,12 +251,12 @@ const VISIBLE_ROUTE_PREFIX = "[auto-route:";
 const DEFAULT_TRANSCRIPT_TAIL_BYTES = 350_000;
 const MAX_RECENT_MESSAGES = 6;
 const MAX_SESSION_CANDIDATES = 12;
+const ACTIVE_SESSION_MAX_AGE_MS = 1000 * 60 * 60 * 12;
 const EFFORT_RANK = {
-  minimal: 0,
-  low: 1,
-  medium: 2,
-  high: 3,
-  xhigh: 4
+  low: 0,
+  medium: 1,
+  high: 2,
+  xhigh: 3
 };
 
 const textIncludesAny = (text, patterns) => patterns.some((pattern) => pattern.test(text));
@@ -217,6 +270,14 @@ function joinNonEmpty(parts, separator = "\n") {
 function safeJsonParse(value) {
   try {
     return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+async function readJsonFile(filePath) {
+  try {
+    return JSON.parse(await fs.readFile(filePath, "utf8"));
   } catch {
     return null;
   }
@@ -292,6 +353,61 @@ function summarizeRecentMessages(messages) {
   return messages.map((message, index) =>
     `${index + 1}. ${message.role}: ${compactSnippet(message.text)}`
   ).join("\n");
+}
+
+function collectMatchedLabels(text, groups) {
+  if (!text) return [];
+  const matched = [];
+  for (const group of groups) {
+    if (textIncludesAny(text, group.patterns)) {
+      matched.push(group.label);
+    }
+  }
+  return matched;
+}
+
+function activeSessionStatePath(cwd) {
+  if (!cwd) {
+    return path.join(os.homedir(), ".codex", "state", "codex-reasoning-router-active-session.json");
+  }
+  return path.join(path.resolve(cwd), ".codex", "state", "codex-reasoning-router-active-session.json");
+}
+
+function isFreshTimestamp(timestamp, maxAgeMs = ACTIVE_SESSION_MAX_AGE_MS) {
+  const time = Date.parse(String(timestamp || ""));
+  if (Number.isNaN(time)) return false;
+  return Date.now() - time <= maxAgeMs;
+}
+
+async function loadActiveSessionBinding(options = {}) {
+  const candidates = [];
+  if (options.sessionBindingPath) {
+    candidates.push(path.resolve(options.sessionBindingPath));
+  }
+  if (options.cwd) {
+    candidates.push(activeSessionStatePath(options.cwd));
+  }
+  candidates.push(activeSessionStatePath(null));
+
+  for (const candidate of Array.from(new Set(candidates))) {
+    const binding = await readJsonFile(candidate);
+    if (!binding || typeof binding !== "object") continue;
+    if (!isFreshTimestamp(binding.updatedAt || binding.timestamp)) continue;
+    if (options.cwd && binding.cwd && path.resolve(binding.cwd) !== path.resolve(options.cwd)) continue;
+    return {
+      path: candidate,
+      cwd: binding.cwd || options.cwd || null,
+      sessionId: binding.sessionId || null,
+      turnId: binding.turnId || null,
+      transcriptPath: binding.transcriptPath || null,
+      phase: binding.phase || null,
+      prompt: binding.prompt || null,
+      lastDecision: binding.lastDecision || binding.decision || null,
+      updatedAt: binding.updatedAt || binding.timestamp || null
+    };
+  }
+
+  return null;
 }
 
 function transcriptPathCandidatesRoot() {
@@ -435,6 +551,9 @@ async function loadTranscriptContext(transcriptPath) {
     return null;
   }
 
+  const carryoverText = joinNonEmpty(recentMessages.map((message) => message.text), "\n");
+  const activeThreadSignals = collectMatchedLabels(carryoverText, THREAD_ACTIVITY_GROUPS);
+
   return {
     transcriptPath,
     modelContextWindow,
@@ -443,7 +562,9 @@ async function loadTranscriptContext(transcriptPath) {
     transcriptCwd,
     recentMessages,
     recentMessagesSummary: summarizeRecentMessages(recentMessages),
-    carryoverText: joinNonEmpty(recentMessages.map((message) => message.text), "\n")
+    carryoverText,
+    activeThreadSignals,
+    threadActivitySummary: activeThreadSignals.join(", ")
   };
 }
 
@@ -473,6 +594,29 @@ function parseGitStatus(statusText) {
     summary: changedLines.length > 0
       ? `${changedLines.length} changed file(s)${changedPaths.length ? `: ${changedPaths.join(", ")}` : ""}`
       : "clean worktree"
+  };
+}
+
+function parseDiffShortStat(shortStatText) {
+  const text = String(shortStatText || "").trim();
+  if (!text) {
+    return {
+      filesChanged: 0,
+      insertions: 0,
+      deletions: 0,
+      summary: null
+    };
+  }
+
+  const filesChanged = Number(text.match(/(\d+)\s+files?\s+changed/i)?.[1] || 0);
+  const insertions = Number(text.match(/(\d+)\s+insertions?\(\+\)/i)?.[1] || 0);
+  const deletions = Number(text.match(/(\d+)\s+deletions?\(-\)/i)?.[1] || 0);
+
+  return {
+    filesChanged,
+    insertions,
+    deletions,
+    summary: text
   };
 }
 
@@ -525,32 +669,84 @@ async function loadWorkspaceContext(cwd) {
   if (!cwd) return null;
 
   try {
-    const { stdout } = await runCommand(
-      "git",
-      ["-C", path.resolve(cwd), "status", "--short", "--branch", "--untracked-files=normal"],
-      { cwd, timeoutMs: 2500 }
+    const repoCwd = path.resolve(cwd);
+    const [statusResult, unstagedResult, stagedResult] = await Promise.all([
+      runCommand(
+        "git",
+        ["-C", repoCwd, "status", "--short", "--branch", "--untracked-files=normal"],
+        { cwd, timeoutMs: 2500 }
+      ),
+      runCommand(
+        "git",
+        ["-C", repoCwd, "diff", "--shortstat"],
+        { cwd, timeoutMs: 2500 }
+      ).catch(() => ({ stdout: "" })),
+      runCommand(
+        "git",
+        ["-C", repoCwd, "diff", "--cached", "--shortstat"],
+        { cwd, timeoutMs: 2500 }
+      ).catch(() => ({ stdout: "" }))
+    ]);
+
+    const base = parseGitStatus(statusResult.stdout);
+    if (!base) return null;
+
+    const unstaged = parseDiffShortStat(unstagedResult.stdout);
+    const staged = parseDiffShortStat(stagedResult.stdout);
+    const changedLineVolume = unstaged.insertions + unstaged.deletions + staged.insertions + staged.deletions;
+    const summaryParts = [];
+    summaryParts.push(
+      base.changedFileCount > 0
+        ? `${base.changedFileCount} changed file(s)${base.changedPaths.length ? `: ${base.changedPaths.join(", ")}` : ""}`
+        : "clean worktree"
     );
-    return parseGitStatus(stdout);
+    if (staged.summary) {
+      summaryParts.push(`staged ${staged.summary}`);
+    }
+    if (unstaged.summary) {
+      summaryParts.push(`unstaged ${unstaged.summary}`);
+    }
+
+    return {
+      ...base,
+      staged,
+      unstaged,
+      hasStagedChanges: staged.filesChanged > 0 || staged.insertions > 0 || staged.deletions > 0,
+      hasUnstagedChanges: unstaged.filesChanged > 0 || unstaged.insertions > 0 || unstaged.deletions > 0,
+      changedLineVolume,
+      summary: summaryParts.join("; ")
+    };
   } catch {
     return null;
   }
 }
 
 export async function collectRoutingContext(options = {}) {
-  const transcriptPath = options.transcriptPath || await findLatestTranscriptForCwd(options.cwd || process.cwd());
+  const sessionBinding = options.sessionBinding || await loadActiveSessionBinding(options);
+  const resolvedCwd = options.cwd || sessionBinding?.cwd || process.cwd();
+  const transcriptPath = options.transcriptPath || sessionBinding?.transcriptPath || await findLatestTranscriptForCwd(resolvedCwd);
   const transcript = await loadTranscriptContext(transcriptPath);
-  const workspace = await loadWorkspaceContext(options.cwd || process.cwd());
-  const previousDecision = options.previousDecision || null;
+  const workspace = await loadWorkspaceContext(resolvedCwd);
+  const previousDecision = options.previousDecision || sessionBinding?.lastDecision || null;
 
   const summaryLines = [];
+  if (sessionBinding?.sessionId) {
+    summaryLines.push(`active Codex session: ${sessionBinding.sessionId}`);
+  }
   if (previousDecision?.effort) {
     summaryLines.push(`previous routed effort in this session: ${previousDecision.effort}`);
+  }
+  if (sessionBinding?.transcriptPath) {
+    summaryLines.push(`active transcript path: ${sessionBinding.transcriptPath}`);
   }
   if (transcript?.modelContextWindow) {
     summaryLines.push(`model context window: ${transcript.modelContextWindow}`);
   }
   if (transcript?.transcriptEffort) {
     summaryLines.push(`latest transcript effort: ${transcript.transcriptEffort}`);
+  }
+  if (transcript?.threadActivitySummary) {
+    summaryLines.push(`active thread signals: ${transcript.threadActivitySummary}`);
   }
   if (transcript?.recentMessagesSummary) {
     summaryLines.push(`recent thread context:\n${transcript.recentMessagesSummary}`);
@@ -563,7 +759,9 @@ export async function collectRoutingContext(options = {}) {
   }
 
   return {
+    cwd: resolvedCwd,
     transcriptPath: transcript?.transcriptPath || null,
+    sessionBinding,
     transcript,
     workspace,
     previousDecision,
@@ -599,6 +797,8 @@ function looksLikeShortFollowUp(prompt) {
 function routingContextLooksActive(routingContext) {
   if (!routingContext) return false;
   if (routingContext.workspace?.changedFileCount > 0) return true;
+  if ((routingContext.workspace?.changedLineVolume || 0) >= 40) return true;
+  if ((routingContext.transcript?.activeThreadSignals?.length || 0) > 0) return true;
   return textIncludesAny(
     String(routingContext.carryoverText || ""),
     FEATURE_GROUPS.flatMap((group) => group.patterns)
@@ -640,8 +840,7 @@ function selectEffort(score, matchedSignals) {
   if (score >= 15) return "xhigh";
   if (score >= 8) return "high";
   if (score >= 3) return "medium";
-  if (score >= 0) return "low";
-  return "minimal";
+  return "low";
 }
 
 function buildReason(prompt, effort, signals, score, contextSummary = null) {
@@ -718,14 +917,14 @@ export function routePromptHeuristic(prompt, options = {}) {
     });
   }
 
-  if (wordCount <= 8 && textIncludesAny(rawPrompt, MINIMAL_PATTERNS) && !carryoverText) {
+  if (wordCount <= 8 && textIncludesAny(rawPrompt, DIRECT_LOOKUP_PATTERNS) && !carryoverText) {
     return buildDecision({
-      effort: "minimal",
-      planEffort: PLAN_EFFORT.minimal,
+      effort: "low",
+      planEffort: PLAN_EFFORT.low,
       score: -2,
       matchedSignals: ["direct-command"],
       promptSnippet: compactSnippet(rawPrompt),
-      reason: "The prompt looks like a direct command or lookup, so extra reasoning would only add latency."
+      reason: "The prompt looks like a direct command or lookup, so the router keeps reasoning on the lightest supported Codex setting."
     });
   }
 
@@ -745,6 +944,10 @@ export function routePromptHeuristic(prompt, options = {}) {
     matchedSignals.push("thread-context");
     score += 1;
   }
+  if ((routingContext?.transcript?.activeThreadSignals?.length || 0) > 0) {
+    matchedSignals.push(...routingContext.transcript.activeThreadSignals);
+    score += Math.min(2, routingContext.transcript.activeThreadSignals.length);
+  }
 
   if (routingContext?.previousDecision?.effort === "high") {
     matchedSignals.push("recent-high-effort");
@@ -761,6 +964,14 @@ export function routePromptHeuristic(prompt, options = {}) {
   if (routingContext?.workspace?.changedFileCount >= 6) {
     matchedSignals.push("wide-dirty-worktree");
     score += 2;
+  }
+  if ((routingContext?.workspace?.changedLineVolume || 0) >= 80) {
+    matchedSignals.push("large-local-diff");
+    score += 2;
+  }
+  if (routingContext?.workspace?.hasStagedChanges && routingContext?.workspace?.hasUnstagedChanges) {
+    matchedSignals.push("mixed-staged-and-unstaged");
+    score += 1;
   }
 
   const hasElevatedRiskSignal = matchedSignals.some((signal) =>
@@ -824,14 +1035,13 @@ export function buildCodexRoutingPrompt(prompt, routingContext = null) {
     "Do not classify the prompt in isolation if recent context shows ongoing work.",
     "",
     "Reasoning levels:",
-    "- minimal: direct shell-like lookups or command-style requests with almost no judgment. Examples: \"what time is it\", \"pwd\", \"git status\", \"show me the version\".",
-    "- low: short bounded conversational tasks, simple status checks, small rewrites, tiny edits, or straightforward confirmations. Examples: \"did you update the readme\", \"rename this variable\", \"rewrite this sentence\".",
+    "- low: the lightest supported Codex effort. Use it for direct lookups, short bounded conversational tasks, simple status checks, small rewrites, tiny edits, or straightforward confirmations. Examples: \"what time is it\", \"did you update the readme\", \"rename this variable\".",
     "- medium: standard coding, implementation, or analysis work that needs normal exploration but not heavy staging.",
     "- high: multi-step debugging, dependency-aware work, risky implementation, or verification-heavy changes.",
     "- xhigh: architecture, migrations, security, production-critical, or broad high-impact work.",
     "",
-    "Important rule: status questions like \"did you update the readme\" are low, not minimal.",
-    "Important rule: reserve minimal only for direct command-like lookups with almost no judgment.",
+    "Important rule: status questions like \"did you update the readme\" are low.",
+    "Important rule: direct command-like lookups are also low, because low is the lightest supported Codex effort here.",
     "Important rule: choose the smallest sufficient effort, not the fanciest one.",
     "Important rule: if the latest prompt is a short follow-up inside an active refactor, debugging, migration, review, or architecture thread, keep the effort aligned to the ongoing work instead of downgrading just because the latest utterance is short.",
     "Important rule: use only the context provided below. If no context is supplied, route from the prompt alone.",
@@ -1000,4 +1210,4 @@ export function formatDecision(decision, format = "text") {
   ].filter(Boolean).join("\n");
 }
 
-export const KNOWN_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
+export const KNOWN_EFFORTS = new Set(["low", "medium", "high", "xhigh"]);

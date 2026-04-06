@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 import { buildCodexRoutingPrompt, routePrompt, routePromptHeuristic } from "../src/router.mjs";
 
@@ -10,9 +13,9 @@ const EMPTY_CONTEXT = {
   previousDecision: null
 };
 
-test("routes direct command prompts to minimal with heuristic mode", async () => {
+test("routes direct command prompts to low with heuristic mode", async () => {
   const decision = await routePrompt("what time is it", { mode: "heuristic", routingContext: EMPTY_CONTEXT });
-  assert.equal(decision.effort, "minimal");
+  assert.equal(decision.effort, "low");
   assert.equal(decision.source, "heuristic");
 });
 
@@ -71,6 +74,70 @@ test("keeps short follow-ups elevated when thread context is still complex", asy
 
   assert.equal(decision.effort, "xhigh");
   assert.match(decision.reason, /context considered/i);
+});
+
+test("uses the exact active session binding for terse follow-ups", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codex-router-context-"));
+  const cwd = path.join(tempRoot, "workspace");
+  const stateDir = path.join(cwd, ".codex", "state");
+  const transcriptPath = path.join(tempRoot, "session.jsonl");
+
+  await fs.mkdir(stateDir, { recursive: true });
+  await fs.writeFile(
+    path.join(stateDir, "codex-reasoning-router-active-session.json"),
+    `${JSON.stringify({
+      updatedAt: new Date().toISOString(),
+      cwd,
+      sessionId: "session-123",
+      transcriptPath,
+      phase: "selected",
+      lastDecision: {
+        effort: "xhigh",
+        reason: "The thread is in the middle of a refactor and blocker investigation."
+      }
+    }, null, 2)}\n`,
+    "utf8"
+  );
+  await fs.writeFile(
+    transcriptPath,
+    [
+      JSON.stringify({
+        type: "turn_context",
+        payload: {
+          cwd,
+          effort: "xhigh",
+          model: "gpt-5.4"
+        }
+      }),
+      JSON.stringify({
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "output_text",
+              text: "We are still debugging a live blocker in the middle of the refactor and need to verify the contract."
+            }
+          ]
+        }
+      })
+    ].join("\n"),
+    "utf8"
+  );
+
+  try {
+    const decision = await routePrompt("so are we done?", {
+      mode: "heuristic",
+      cwd
+    });
+
+    assert.equal(decision.effort, "xhigh");
+    assert.match(decision.signals.join(" "), /recent-xhigh-effort/);
+    assert.match(decision.signals.join(" "), /active-refactor/);
+  } finally {
+    await fs.rm(tempRoot, { recursive: true, force: true });
+  }
 });
 
 test("uses model router decisions by default", async () => {
