@@ -26,6 +26,37 @@ async function fileExists(filePath) {
   }
 }
 
+function emptyHooksShape() {
+  return { hooks: { SessionStart: [], UserPromptSubmit: [], PreToolUse: [], Stop: [] } };
+}
+
+function normalizeHooksSource(source) {
+  const normalized = source && typeof source === "object" ? source : emptyHooksShape();
+  if (!normalized.hooks || typeof normalized.hooks !== "object") normalized.hooks = {};
+  if (!Array.isArray(normalized.hooks.SessionStart)) normalized.hooks.SessionStart = [];
+  if (!Array.isArray(normalized.hooks.UserPromptSubmit)) normalized.hooks.UserPromptSubmit = [];
+  if (!Array.isArray(normalized.hooks.PreToolUse)) normalized.hooks.PreToolUse = [];
+  if (!Array.isArray(normalized.hooks.Stop)) normalized.hooks.Stop = [];
+  return normalized;
+}
+
+function desiredHookEntries(commandString) {
+  return [
+    { event: "SessionStart", matcher: "", command: `${commandString} session-start` },
+    { event: "UserPromptSubmit", matcher: "", command: `${commandString} user-prompt-submit` },
+    { event: "PreToolUse", matcher: "Bash", command: `${commandString} pre-tool-use` },
+    { event: "Stop", matcher: "", command: `${commandString} stop` }
+  ];
+}
+
+async function readHooksSource(hooksPath) {
+  if (!await fileExists(hooksPath)) {
+    return emptyHooksShape();
+  }
+
+  return normalizeHooksSource(JSON.parse(await fs.readFile(hooksPath, "utf8")));
+}
+
 async function mergeConfig(configPath) {
   const exists = await fileExists(configPath);
   if (!exists) {
@@ -68,22 +99,8 @@ async function mergeConfig(configPath) {
 }
 
 async function mergeHooks(hooksPath, commandString) {
-  let source = { hooks: { SessionStart: [], UserPromptSubmit: [], PreToolUse: [], Stop: [] } };
-  if (await fileExists(hooksPath)) {
-    source = JSON.parse(await fs.readFile(hooksPath, "utf8"));
-    if (!source.hooks || typeof source.hooks !== "object") source.hooks = {};
-    if (!Array.isArray(source.hooks.SessionStart)) source.hooks.SessionStart = [];
-    if (!Array.isArray(source.hooks.UserPromptSubmit)) source.hooks.UserPromptSubmit = [];
-    if (!Array.isArray(source.hooks.PreToolUse)) source.hooks.PreToolUse = [];
-    if (!Array.isArray(source.hooks.Stop)) source.hooks.Stop = [];
-  }
-
-  const desired = [
-    { event: "SessionStart", matcher: "", command: `${commandString} session-start` },
-    { event: "UserPromptSubmit", matcher: "", command: `${commandString} user-prompt-submit` },
-    { event: "PreToolUse", matcher: "Bash", command: `${commandString} pre-tool-use` },
-    { event: "Stop", matcher: "", command: `${commandString} stop` }
-  ];
+  const source = await readHooksSource(hooksPath);
+  const desired = desiredHookEntries(commandString);
 
   let updated = false;
   for (const item of desired) {
@@ -112,6 +129,86 @@ async function mergeHooks(hooksPath, commandString) {
   }
 
   return { updated };
+}
+
+export async function setHooksEnabledInCodexDir({
+  targetDir,
+  hookCommand,
+  enabled
+}) {
+  const resolved = normalizeTargetDir(targetDir);
+  const hooksPath = path.join(resolved, "hooks.json");
+  const source = await readHooksSource(hooksPath);
+  const desired = desiredHookEntries(hookCommand);
+  let updated = false;
+
+  if (enabled) {
+    const merged = await mergeHooks(hooksPath, hookCommand);
+    return {
+      codexDir: resolved,
+      hooksPath,
+      hooksInstalled: true,
+      updated: merged.updated
+    };
+  }
+
+  for (const item of desired) {
+    const list = source.hooks[item.event];
+    const filtered = list
+      .map((entry) => {
+        const hooks = Array.isArray(entry?.hooks) ? entry.hooks : [];
+        const nextHooks = hooks.filter((hook) => !(hook?.type === "command" && hook?.command === item.command));
+        if (nextHooks.length === hooks.length) {
+          return entry;
+        }
+        updated = true;
+        if (nextHooks.length === 0) {
+          return null;
+        }
+        return {
+          ...entry,
+          hooks: nextHooks
+        };
+      })
+      .filter(Boolean);
+    source.hooks[item.event] = filtered;
+  }
+
+  if (updated) {
+    await fs.writeFile(hooksPath, `${JSON.stringify(source, null, 2)}\n`, "utf8");
+  }
+
+  return {
+    codexDir: resolved,
+    hooksPath,
+    hooksInstalled: false,
+    updated
+  };
+}
+
+export async function readHookInstallState({
+  targetDir,
+  hookCommand
+}) {
+  const resolved = normalizeTargetDir(targetDir);
+  const hooksPath = path.join(resolved, "hooks.json");
+  const source = await readHooksSource(hooksPath);
+  const desired = desiredHookEntries(hookCommand);
+
+  const hooksInstalled = desired.every((item) => {
+    const list = source.hooks[item.event];
+    return list.some((entry) => {
+      const hooks = Array.isArray(entry?.hooks) ? entry.hooks : [];
+      return entry?.matcher === item.matcher &&
+        hooks.some((hook) => hook?.type === "command" && hook?.command === item.command);
+    });
+  });
+
+  return {
+    codexDir: resolved,
+    hooksPath,
+    hooksInstalled
+  };
 }
 
 export async function installIntoCodexDir({

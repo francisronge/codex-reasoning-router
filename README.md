@@ -98,6 +98,18 @@ On macOS, the menubar watcher uses two visibility sources:
 - hook state files when Codex updates them normally
 - a send-time Codex window fallback that listens for Return, OCRs the visible composer box, and classifies the prompt immediately
 
+If you want CRR fully off, use:
+
+```bash
+codex-reasoning-router control disable --scope global
+```
+
+That removes CRR's own entries from `~/.codex/hooks.json`, so Codex stops invoking the router hooks entirely. Re-enable with:
+
+```bash
+codex-reasoning-router control enable --scope global
+```
+
 ## Routing policy
 
 The model classifier chooses the smallest sufficient effort:

@@ -44,6 +44,7 @@ struct ClassifierRecord: Decodable {
 
 struct RouterControlRecord: Decodable {
   let routerEnabled: Bool?
+  let hooksInstalled: Bool?
   let updatedAt: String?
   let source: String?
 }
@@ -190,11 +191,11 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
   private func renderPaused() {
     if let button = statusItem.button {
       button.title = "CRR OFF"
-      button.toolTip = "codex-reasoning-router is paused"
+      button.toolTip = "codex-reasoning-router is disabled"
     }
-    promptTitleItem.title = "Prompt: router paused"
+    promptTitleItem.title = "Prompt: router disabled"
     effortItem.title = "Effort: off"
-    sourceItem.title = "Source: paused"
+    sourceItem.title = "Source: disabled"
     pathItem.title = truncate("State file: \(controlPath)", max: 72)
   }
 
@@ -534,10 +535,10 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
   }
 
   @objc private func toggleRouter() {
-    let subcommand = isRouterEnabled() ? "pause" : "resume"
+    let subcommand = isRouterEnabled() ? "disable" : "enable"
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-    process.arguments = ["node", cliPath, "control", subcommand, "--json"]
+    process.arguments = ["node", cliPath, "control", subcommand, "--scope", "global", "--json"]
     process.standardOutput = Pipe()
     process.standardError = Pipe()
 
@@ -547,7 +548,7 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
       guard process.terminationStatus == 0 else {
         return
       }
-      if subcommand == "pause" {
+      if subcommand == "disable" {
         previewState = nil
       }
       refreshNow()
@@ -557,7 +558,7 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
   }
 
   private func updateRouterToggleTitle(routerEnabled: Bool) {
-    routerToggleItem.title = routerEnabled ? "Pause Router" : "Resume Router"
+    routerToggleItem.title = routerEnabled ? "Disable Router" : "Enable Router"
   }
 
   private func isRouterEnabled() -> Bool {
@@ -565,7 +566,7 @@ final class RouteMenubarController: NSObject, NSApplicationDelegate {
           let record = try? JSONDecoder().decode(RouterControlRecord.self, from: data) else {
       return true
     }
-    return record.routerEnabled != false
+    return record.routerEnabled != false && record.hooksInstalled != false
   }
 
   private func composerCaptureTarget() -> CodexWindowTarget? {

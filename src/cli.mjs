@@ -13,7 +13,7 @@ import {
   runUserPromptSubmitHook,
   writeRouterControlState
 } from "./hook.mjs";
-import { installIntoCodexDir } from "./install.mjs";
+import { installIntoCodexDir, readHookInstallState, setHooksEnabledInCodexDir } from "./install.mjs";
 import { formatDecision, routePrompt } from "./router.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -31,7 +31,7 @@ function usage() {
     "  launch [--heuristic-router] [codex args...] -- \"prompt text\"",
     "  install [--scope global|project] [--root DIR]",
     "  menubar [--foreground] [--path FILE]...",
-    "  control status|pause|resume [--json]",
+    "  control status|pause|resume|disable|enable [--scope global|project] [--root DIR] [--json]",
     ""
   ].join("\n");
 }
@@ -91,6 +91,12 @@ function hasReasoningOverride(args) {
     }
     return arg.includes("model_reasoning_effort") || arg.includes("plan_mode_reasoning_effort");
   });
+}
+
+function resolveCodexTargetDir({ scope, root }) {
+  return scope === "global"
+    ? path.join(os.homedir(), ".codex")
+    : path.join(path.resolve(root || process.cwd()), ".codex");
 }
 
 async function runClassify(args) {
@@ -177,9 +183,7 @@ async function runLaunch(args) {
 async function runInstall(args) {
   const scope = parseFlag(args, "--scope") || "project";
   const root = parseFlag(args, "--root");
-  const targetDir = scope === "global"
-    ? path.join(os.homedir(), ".codex")
-    : path.join(path.resolve(root || process.cwd()), ".codex");
+  const targetDir = resolveCodexTargetDir({ scope, root });
   const hookCommand = `${JSON.stringify(process.execPath)} ${JSON.stringify(cliPath)} hook`;
   const result = await installIntoCodexDir({ targetDir, hookCommand });
 
@@ -253,11 +257,24 @@ async function runMenubar(args) {
 
 async function runControl(args) {
   const subcommand = args.shift();
+  const scope = parseFlag(args, "--scope") || "global";
+  const root = parseFlag(args, "--root");
   const format = hasFlag(args, "--json") ? "json" : "text";
+  const targetDir = resolveCodexTargetDir({ scope, root });
+  const hookCommand = `${JSON.stringify(process.execPath)} ${JSON.stringify(cliPath)} hook`;
 
   let state;
   if (subcommand === "status" || !subcommand) {
-    state = await readRouterControlState();
+    const [controlState, hookState] = await Promise.all([
+      readRouterControlState(),
+      readHookInstallState({ targetDir, hookCommand })
+    ]);
+    state = {
+      ...controlState,
+      hooksInstalled: hookState.hooksInstalled,
+      codexDir: hookState.codexDir,
+      hooksPath: hookState.hooksPath
+    };
   } else if (subcommand === "pause") {
     state = await writeRouterControlState({
       routerEnabled: false,
@@ -268,8 +285,44 @@ async function runControl(args) {
       routerEnabled: true,
       source: "cli-control"
     });
+  } else if (subcommand === "disable") {
+    const hookState = await setHooksEnabledInCodexDir({
+      targetDir,
+      hookCommand,
+      enabled: false
+    });
+    state = await writeRouterControlState({
+      routerEnabled: false,
+      hooksInstalled: false,
+      source: "cli-control"
+    });
+    state = {
+      ...state,
+      codexDir: hookState.codexDir,
+      hooksPath: hookState.hooksPath,
+      hooksInstalled: false,
+      hooksUpdated: hookState.updated
+    };
+  } else if (subcommand === "enable") {
+    const hookState = await setHooksEnabledInCodexDir({
+      targetDir,
+      hookCommand,
+      enabled: true
+    });
+    state = await writeRouterControlState({
+      routerEnabled: true,
+      hooksInstalled: true,
+      source: "cli-control"
+    });
+    state = {
+      ...state,
+      codexDir: hookState.codexDir,
+      hooksPath: hookState.hooksPath,
+      hooksInstalled: true,
+      hooksUpdated: hookState.updated
+    };
   } else {
-    throw new Error('Supported control subcommands: "status", "pause", "resume".');
+    throw new Error('Supported control subcommands: "status", "pause", "resume", "disable", "enable".');
   }
 
   if (format === "json") {
@@ -278,7 +331,11 @@ async function runControl(args) {
   }
 
   process.stdout.write(
-    `router_enabled: ${state.routerEnabled !== false}\nupdated_at: ${state.updatedAt ?? "n/a"}\nsource: ${state.source ?? "unknown"}\n`
+    `router_enabled: ${state.routerEnabled !== false}\n` +
+    `hooks_installed: ${state.hooksInstalled !== false}\n` +
+    `updated_at: ${state.updatedAt ?? "n/a"}\n` +
+    `source: ${state.source ?? "unknown"}\n` +
+    `${state.hooksPath ? `hooks_path: ${state.hooksPath}\n` : ""}`
   );
 }
 

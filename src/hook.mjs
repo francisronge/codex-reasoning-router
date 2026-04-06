@@ -124,6 +124,7 @@ export async function readRouterControlState() {
   if (!state || typeof state !== "object") {
     return {
       routerEnabled: true,
+      hooksInstalled: true,
       updatedAt: null,
       source: "default"
     };
@@ -131,14 +132,17 @@ export async function readRouterControlState() {
   const routerEnabled = state.routerEnabled !== false && state.paused !== true;
   return {
     routerEnabled,
+    hooksInstalled: state.hooksInstalled !== false,
     updatedAt: state.updatedAt || null,
     source: state.source || "state-file"
   };
 }
 
-export async function writeRouterControlState({ routerEnabled, source = "manual" }) {
+export async function writeRouterControlState({ routerEnabled, hooksInstalled, source = "manual" }) {
+  const existing = await readJson(controlStatePath(), null);
   const nextState = {
     routerEnabled: routerEnabled !== false,
+    hooksInstalled: hooksInstalled ?? (existing?.hooksInstalled !== false),
     updatedAt: new Date().toISOString(),
     source
   };

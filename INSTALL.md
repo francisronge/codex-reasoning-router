@@ -36,6 +36,18 @@ Launch the watcher:
 codex-reasoning-router menubar --path ./.codex/state/codex-reasoning-router-last-route.json
 ```
 
+To turn CRR completely off, disable its hooks:
+
+```bash
+codex-reasoning-router control disable --scope global
+```
+
+That removes CRR from `~/.codex/hooks.json`, so Codex stops showing its hook lifecycle rows. Re-enable with:
+
+```bash
+codex-reasoning-router control enable --scope global
+```
+
 Optional shell alias:
 
 ```bash
